@@ -98,6 +98,15 @@ impl Tree {
         }
     }
 
+    /// Drop an SELinux label this tree did not set: on a host running
+    /// SELinux, `mkfs.xfs -p` copies each source file's label.
+    pub fn unlabelled(&self, path: &str, mut got: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+        if !self.attrs.iter().any(|a| a.0 == path && a.1 == "-s" && a.2 == "selinux") {
+            got.retain(|x| x.0 != "security.selinux");
+        }
+        got
+    }
+
     /// The attributes a path should read back with, sorted.
     pub fn attrs_of(&self, path: &str) -> Vec<(String, Vec<u8>)> {
         let mut v: Vec<_> = self
@@ -137,7 +146,7 @@ impl Tree {
             match want {
                 Want::File { data, mode, uid, gid } => {
                     let f = src.join(format!("f{i}"));
-                    std::fs::write(&f, data).unwrap();
+                    write_sparse(&f, data);
                     out.push_str(&format!("{name} -{} {uid} {gid} {}\n", perm(*mode), f.display()));
                 }
                 Want::Dir { mode } => {
@@ -157,6 +166,19 @@ impl Tree {
         }
         out
     }
+}
+
+/// Write a source file with every all-zero 4 KiB piece left as a hole, so
+/// `mkfs.xfs -p` (which copies holes as holes) sees the holes.
+fn write_sparse(path: &Path, data: &[u8]) {
+    use std::os::unix::fs::FileExt;
+    let f = std::fs::File::create(path).unwrap();
+    for (i, piece) in data.chunks(4096).enumerate() {
+        if piece.iter().any(|&b| b != 0) {
+            f.write_all_at(piece, i as u64 * 4096).unwrap();
+        }
+    }
+    f.set_len(data.len() as u64).unwrap();
 }
 
 /// A sparse file: 4 KiB of data every 8 KiB, so each piece is its own
