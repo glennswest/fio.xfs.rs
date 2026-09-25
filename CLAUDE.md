@@ -3,6 +3,9 @@
 Userspace file I/O into XFS. Follow fio.ext4.rs's structure and rules (read
 its CLAUDE.md).
 
+- **Crate:** `fio-xfs` (lib `fio_xfs`), binary `fio-xfs`
+- **Version:** 0.2.0 — `Cargo.toml` and `VERSION` must match
+
 ## Work plan
 - [x] Issue #1 — the read side (2026-09-25).
       - The format and the read layer live here for now: mkfs.xfs.rs is a
