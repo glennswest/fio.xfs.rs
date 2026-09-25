@@ -2,8 +2,35 @@
 name = "fio-xfs"
 version = "0.1.0"
 edition = "2021"
+authors = ["Glenn West"]
 license = "MIT OR Apache-2.0"
 description = "Async userspace file I/O into XFS — read and write files with no kernel, no mount, no loop device"
 repository = "https://github.com/glennswest/fio.xfs.rs"
+rust-version = "1.75"
+keywords = ["xfs", "filesystem", "async", "userspace"]
+categories = ["filesystem", "asynchronous"]
+
+[lib]
+name = "fio_xfs"
+path = "src/lib.rs"
 
 [dependencies]
+tokio = { version = "1", features = ["fs", "io-util", "rt", "sync", "macros"] }
+async-trait = "0.1"
+thiserror = "2"
+
+clap = { version = "4", features = ["derive"], optional = true }
+anyhow = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:anyhow", "tokio/rt-multi-thread", "tokio/io-std"]
+
+[[bin]]
+name = "fio-xfs"
+path = "src/bin/fio_xfs.rs"
+required-features = ["cli"]
