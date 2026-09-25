@@ -277,8 +277,8 @@ mod tests {
         assert_eq!(v, b"9 path=a\n");
         let mut v = Vec::new();
         pax_record(&mut v, "path", &[b'x'; 95]);
-        assert_eq!(v.len(), 104);
-        assert!(v.starts_with(b"104 path="));
+        assert_eq!(v.len(), 105);
+        assert!(v.starts_with(b"105 path="));
     }
 
     #[test]
