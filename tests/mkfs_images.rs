@@ -177,7 +177,8 @@ async fn verify(img: &Image, tree: &Tree) {
         assert!(got == tree.attrs_of(path), "{path} attributes: {:?}", got.iter().map(|g| &g.0).collect::<Vec<_>>());
     }
     assert_eq!(vol.get_xattr("/hello.txt", "user.greeting").await.unwrap().unwrap(), b"hello");
-    assert!(vol.list_xattrs("/empty").await.unwrap().is_empty());
+    let none: Vec<_> = vol.list_xattrs("/empty").await.unwrap().into_iter().map(|x| (x.name, x.value)).collect();
+    assert!(tree.unlabelled("empty", none).is_empty());
 
     verify_tar(&vol, tree, img).await;
     verify_extract(&vol, tree, &walked).await;

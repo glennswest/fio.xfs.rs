@@ -388,6 +388,10 @@ impl<D: BlockDevice> Volume<D> {
     pub async fn xattrs_inode(&self, inode: &Inode) -> Result<Vec<Xattr>> {
         let found = match inode.aformat {
             None => return Ok(Vec::new()),
+            // An attribute fork made ready and never used: Linux gives new
+            // inodes one up front when ACLs or security labels may follow,
+            // and counts it as no attributes (`xfs_inode_hasattr`).
+            Some(Format::Extents) if inode.anextents == 0 => return Ok(Vec::new()),
             Some(Format::Local) => attr::parse_shortform(&inode.attr_fork)?,
             Some(Format::Extents | Format::Btree) => {
                 let extents = self.extents(inode, true).await?;
