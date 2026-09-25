@@ -1,0 +1,5 @@
+target/
+*.img
+.DS_Store
+*.swp
+.env

@@ -1,0 +1,9 @@
+[package]
+name = "fio-xfs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Async userspace file I/O into XFS — read and write files with no kernel, no mount, no loop device"
+repository = "https://github.com/glennswest/fio.xfs.rs"
+
+[dependencies]
