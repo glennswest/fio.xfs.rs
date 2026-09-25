@@ -61,10 +61,24 @@ fio-xfs IMAGE tar [-o FILE] [--root PATH]
 
 ## Tests
 
-`cargo test` runs the unit tests everywhere. The integration tests in
-`tests/` make real filesystems with `mkfs.xfs` and compare what this crate
-reads with what was put in; they need `mkfs.xfs` on the machine and say so
-and skip when it is missing. They run on the build box through `sc-build`.
+`cargo test` runs the unit tests everywhere, and two integration tests that
+need real tools and say so and pass when they are missing:
+
+- `tests/mkfs_images.rs` — images made by `mkfs.xfs -p` (a protofile) with
+  attributes set by `xfs_db`, checked with `xfs_repair -n`, then read back:
+  every directory form, extent and B+tree forks, inline and remote symlinks
+  and attribute values, devices; on v5 and v4, with and without `ftype`,
+  bigtime and 64-bit extent counts, 1 KiB blocks with 8 KiB directory
+  blocks, 2 KiB inodes and 16 AGs. The tar output is read by GNU tar too.
+- `tests/kernel.rs` — **the kernel is the judge**: the host's own kernel
+  boots under qemu/KVM (no root) with the test binary as its init, mounts a
+  fresh image and writes a tree through ordinary system calls — hard links,
+  POSIX ACLs, xattrs up to 20 KB, 20 000-name directories, holes, unwritten
+  and reflinked extents, device nodes, sockets, pre-1970 and post-2038
+  nanosecond times, non-UTF-8 names — then every name is read back and
+  compared.
+
+They run on the build box through `sc-build`.
 
 ## Licence
 
