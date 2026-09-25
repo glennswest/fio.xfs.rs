@@ -25,6 +25,15 @@ anyhow = { version = "1", optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
+# The kernel test's guest side mounts, loads modules and makes device nodes.
+libc = "0.2"
+
+# Boots the host kernel under qemu and is its own init, so it has its own
+# main rather than libtest's.
+[[test]]
+name = "kernel"
+path = "tests/kernel.rs"
+harness = false
 
 [features]
 default = ["cli"]
