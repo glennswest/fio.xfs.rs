@@ -167,7 +167,7 @@ impl<D: BlockDevice> Volume<D> {
     /// Copy a tree onto the local filesystem under `dest`, which must be a
     /// new or empty directory.
     ///
-    /// Regular files (holes kept as holes), directories, symlinks and hard
+    /// Regular files (zero-filled 4 KiB pieces become holes), directories, symlinks and hard
     /// links are created, with their permission bits and modification times;
     /// ownership too if asked. Device nodes, FIFOs and sockets are not, and
     /// neither are extended attributes — both are counted in the report.
@@ -213,11 +213,7 @@ impl<D: BlockDevice> Volume<D> {
                     let mut off = 0;
                     while off < st.size {
                         let chunk = self.read_inode_range(&inode, &extents, off, CHUNK).await?;
-                        if chunk.iter().all(|&b| b == 0) {
-                            f.seek(std::io::SeekFrom::Current(chunk.len() as i64)).await?;
-                        } else {
-                            f.write_all(&chunk).await?;
-                        }
+                        write_sparse(&mut f, &chunk).await?;
                         off += chunk.len() as u64;
                     }
                     f.set_len(st.size).await?;
@@ -250,6 +246,28 @@ impl<D: BlockDevice> Volume<D> {
         }
         Ok(report)
     }
+}
+
+/// Write `buf` at the file's position, seeking over every all-zero 4 KiB
+/// piece rather than writing it, so holes stay holes (as `cp --sparse`).
+async fn write_sparse(f: &mut tokio::fs::File, buf: &[u8]) -> Result<()> {
+    const PIECE: usize = 4096;
+    let mut at = 0;
+    while at < buf.len() {
+        let zero = |i: usize| buf[i..(i + PIECE).min(buf.len())].iter().all(|&b| b == 0);
+        let run_zero = zero(at);
+        let mut end = at;
+        while end < buf.len() && zero(end) == run_zero {
+            end = (end + PIECE).min(buf.len());
+        }
+        if run_zero {
+            f.seek(std::io::SeekFrom::Current((end - at) as i64)).await?;
+        } else {
+            f.write_all(&buf[at..end]).await?;
+        }
+        at = end;
+    }
+    Ok(())
 }
 
 async fn set_mode(path: &Path, m: u16) -> Result<()> {
