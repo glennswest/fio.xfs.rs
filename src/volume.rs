@@ -362,17 +362,26 @@ impl<D: BlockDevice> Volume<D> {
             let buf = self.read_mapped(&extents, 0, size.div_ceil(bs)).await?;
             return Ok(buf[..size as usize].to_vec());
         }
-        let per = bs - SYMLINK_HDR as u64;
+        // One header per mapped extent, not per block: Linux writes each
+        // mapping as one buffer (`xfs_symlink_write_target`), and its
+        // checksum covers the whole run.
         let mut out = Vec::with_capacity(size as usize);
-        for lblk in 0..size.div_ceil(per) {
-            let buf = self.read_mapped(&extents, lblk, 1).await?;
+        for e in &extents {
+            if out.len() as u64 >= size {
+                break;
+            }
+            if e.unwritten {
+                return Err(corrupt(format!("inode {}: unwritten symlink block", inode.ino)));
+            }
+            let buf = self.read_blocks(e.block, e.count).await?;
             let bytes = crate::bytes::be32(&buf, 8) as usize;
             if crate::bytes::be32(&buf, 0) != SYMLINK_MAGIC
                 || !crate::crc::verify(&buf, 12)
                 || crate::bytes::be64(&buf, 32) != inode.ino
+                || crate::bytes::be32(&buf, 4) as usize != out.len()
                 || SYMLINK_HDR + bytes > buf.len()
             {
-                return Err(corrupt(format!("inode {}: remote symlink block {lblk}", inode.ino)));
+                return Err(corrupt(format!("inode {}: remote symlink block {}", inode.ino, e.offset)));
             }
             out.extend_from_slice(&buf[SYMLINK_HDR..SYMLINK_HDR + bytes]);
         }
