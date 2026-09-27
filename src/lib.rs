@@ -32,7 +32,8 @@
 //! 64-bit extent counters.
 //!
 //! What it does not: files on a realtime device, and replaying the log —
-//! read a filesystem that was cleanly unmounted.
+//! read a filesystem that was cleanly unmounted. A dirty log is not
+//! detected either: such an image opens and reads as it stands on disk.
 //!
 //! # Getting a tree out
 //!

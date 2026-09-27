@@ -21,7 +21,8 @@ issue #5, and until then stormblock refuses `seed` on XFS templates.
 | Directories | short form, block, leaf and node |
 | Symlinks | inline and remote |
 | Extended attributes | short form, leaf and node, remote values; XFS ACLs shown as `system.posix_acl_*`; parent pointers hidden |
-| Not read | files on a realtime device; the log (read cleanly unmounted filesystems) |
+| Not read | files on a realtime device — `walk` lists them, reading one is `Error::Unsupported` (#7); the log — read cleanly unmounted filesystems: a dirty log is **not detected**, so an image taken from a running or crashed system reads without warning and may be stale (#6) |
+| Refused at open | v4 without v2 directories; v5 with unknown incompatible features or `NEEDSREPAIR` set; any superblock that fails its checksum |
 
 ## Library
 
@@ -53,7 +54,7 @@ image's root, at most 40 hops); `stat`, `lookup`, `read_link` and
 `list_xattrs` do not follow a final symlink, `read`, `read_range` and
 `read_dir` do. A name is found by scanning the directory's data blocks, not
 through its hash index, so one lookup in a very large directory costs a
-read of the whole directory; `walk`, `pack_tar_to` and `extract` go by
+read of the whole directory (#8); `walk`, `pack_tar_to` and `extract` go by
 inode and do not pay that.
 
 Anything that implements `fio_xfs::BlockDevice` (`size` and `read_at`) can

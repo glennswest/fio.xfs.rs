@@ -25,11 +25,15 @@ its CLAUDE.md).
 - [x] Tests against real XFS images: `tests/mkfs_images.rs` (mkfs.xfs -p +
       xfs_db attr_set, 7 geometries/versions) and `tests/kernel.rs` (dev's
       own kernel populates images under qemu/KVM, unprivileged)
-- [ ] Hashed name lookup through the leaf/node index: `lookup` scans a
+- [ ] Issue #8 (P3) — hashed name lookup through the leaf/node index: `lookup` scans a
       directory's data blocks, which is fine for `walk` (by inode) but
       O(size) per path component in a huge directory
 - [ ] Issue #4 — share mkfs-xfs's on-disk layer (format constants, CRC,
       device trait) rather than a second copy
+- [ ] Issue #6 (P2) — detect a dirty log (log head/tail from the record
+      headers) and refuse or report it; `Volume::open` never looks at the log
+- [ ] Issue #7 (P3) — realtime-device files: `read_inode_range` returns
+      `Unsupported` for `XFS_DIFLAG_REALTIME` inodes
 - [ ] Issue #5 (P3) — write: create files and directories, allocate extents,
       update the B+trees (clean writes on an unmounted filesystem); stormblock
       needs it to seed XFS templates
