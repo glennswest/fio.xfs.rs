@@ -37,16 +37,18 @@ its CLAUDE.md).
 - [ ] Issue #5 (P3) — write: create files and directories, allocate extents,
       update the B+trees (clean writes on an unmounted filesystem); stormblock
       needs it to seed XFS templates
-- [ ] Issue #9 (P3, docs) — the next item is stale: XFS media import is done
-      through the engine (stormblock#147); check it off
-- [ ] Registry import of XFS images (stormblock already reads XFS blanks
-      with this crate; the registry is its repo's work)
+- [x] Issue #9 — XFS media import (2026-09-27): done in stormblock#147, not
+      here. The engine's `POST /api/v1/volumes/import` walks XFS (whole
+      volumes and GPT partitions) with this crate; stormblock-registry imports
+      media through that API. XFS for the registry's own PVC blank ladder
+      (`pvc-ext4j-*`) is stormcos#91's decision, not work in this crate.
 
 ## Where things stand (2026-09-27)
 
-Docs refreshed from the code (24d3b60, sc-build passing). #1 was already closed.
-Issue comments mined: filed stormblock#198 (P2: its XFS import should refuse a
-dirty log, once #6 lands; proposed after #6) and #9 here. No work in progress.
+Docs refreshed from the code again: no code has changed since v0.2.0
+(2026-09-25). README says how XFS images reach the crate (stormblock#147's
+engine import); #9 checked off and closed. Open: #6 (P2), #4, #5, #7, #8.
+No work in progress.
 
 ## Things learned the hard way (issue #1)
 

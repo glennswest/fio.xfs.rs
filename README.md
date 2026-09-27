@@ -4,10 +4,12 @@ Async **userspace file I/O into XFS** — read files with no kernel, no mount
 and no loop device; the XFS sibling of
 [fio.ext4.rs](https://github.com/glennswest/fio.ext4.rs).
 
-Why: stormblock and the registry import and verify images whose root is XFS
-(RHEL, Rocky, Alma cloud images) the same way they use `fio-ext4`.
-stormblock already reads the XFS blanks it formats with `mkfs-xfs` through
-this crate.
+Why: images whose root is XFS (RHEL, Rocky, Alma cloud images) are imported
+and verified the same way as ext4 ones. stormblock's engine import
+(`POST /api/v1/volumes/import`, stormblock#147) finds, opens and walks XFS
+filesystems — whole volumes and GPT partitions — with this crate, and
+stormblock-registry imports media through that engine API. stormblock also
+reads the XFS blanks it formats with `mkfs-xfs` through it.
 
 ## Status
 
