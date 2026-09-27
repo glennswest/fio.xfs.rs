@@ -5,15 +5,18 @@ and no loop device; the XFS sibling of
 [fio.ext4.rs](https://github.com/glennswest/fio.ext4.rs).
 
 Why: stormblock and the registry import and verify images whose root is XFS
-(RHEL, Rocky, Alma cloud images) the same way they use `fio-ext4` today.
+(RHEL, Rocky, Alma cloud images) the same way they use `fio-ext4`.
+stormblock already reads the XFS blanks it formats with `mkfs-xfs` through
+this crate.
 
 ## Status
 
-Reading (issue #1). Writing is next.
+v0.2.0 reads (#1). It does not write: seeding files into an XFS volume is
+issue #5, and until then stormblock refuses `seed` on XFS templates.
 
 | Reads | |
 |---|---|
-| Filesystems | v4 and v5 (CRC); every v5 metadata checksum is checked |
+| Filesystems | v4 and v5 (CRC); on v5 the checksum of everything read is checked — superblock, inodes, bmap B+tree blocks, directory data blocks, attribute leaf/node blocks, remote attribute values and remote symlinks (free-space and inode B+trees and directory index blocks are not read at all) |
 | Inodes | v1/v2/v3; local, extent-list and B+tree forks; bigtime; 64-bit extent counts |
 | Directories | short form, block, leaf and node |
 | Symlinks | inline and remote |
@@ -38,14 +41,41 @@ let tree = vol.walk("/").await?;
 // symlinks, hard links, devices and xattrs (SCHILY.xattr.*) intact.
 let report = vol.pack_tar_to(fio_xfs::tar::Io::new(file), "/").await?;
 
-// Or into a local directory (no devices or xattrs; owners with --owner as root).
+// Or into a local directory: files, directories, symlinks and hard links
+// with modes and mtimes; all-zero 4 KiB pieces become holes. Device nodes,
+// FIFOs, sockets and xattrs are counted in the report, not created;
+// owners only with `ExtractOptions { owner: true }` (needs root).
 vol.extract("/", dest, &Default::default()).await?;
 ```
+
+Lookups resolve symlinks in the middle of a path (absolute targets from the
+image's root, at most 40 hops); `stat`, `lookup`, `read_link` and
+`list_xattrs` do not follow a final symlink, `read`, `read_range` and
+`read_dir` do. A name is found by scanning the directory's data blocks, not
+through its hash index, so one lookup in a very large directory costs a
+read of the whole directory; `walk`, `pack_tar_to` and `extract` go by
+inode and do not pay that.
 
 Anything that implements `fio_xfs::BlockDevice` (`size` and `read_at`) can
 be read; `FileDevice` and `MemDevice` are provided.
 
+## How it ships
+
+A library crate with a CLI, not a service: no configuration, no ports.
+Consumers depend on it by git tag, as they do on fio-ext4:
+
+```toml
+fio-xfs = { git = "https://github.com/glennswest/fio.xfs.rs", tag = "v0.2.0", default-features = false }
+```
+
+The default `cli` feature builds the `fio-xfs` binary (clap, anyhow, the
+multi-threaded tokio runtime); `default-features = false` leaves the library
+alone. It has no golden: stormcentral does not list it as a component, and
+it ships inside whatever links it.
+
 ## CLI
+
+All commands read `IMAGE` (a file or block device) and never write to it.
 
 ```
 fio-xfs IMAGE info

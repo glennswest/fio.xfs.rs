@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-27
+- **docs:** Refreshed from the code: the crate description no longer promises writing (issue #5); how it ships (git tag, `cli` feature, no golden); which v5 checksums are checked; symlink-following and lookup cost; what `extract` creates; the first reads `Volume::open` makes; mkfs-xfs's on-disk layer (#4) in the work plan
+
 ## [v0.2.0] — 2026-09-25
 
 ### Added

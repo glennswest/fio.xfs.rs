@@ -10,9 +10,9 @@ use crate::error::Result;
 /// Something a filesystem can be read from — an image file, a volume, memory.
 ///
 /// Reading is all this crate asks for. Every read it issues is whole
-/// filesystem blocks at a block boundary, except the first read of
-/// [`crate::Volume::open`], which is the first 4 KiB of the device before the
-/// block size is known.
+/// filesystem blocks at a block boundary, except in
+/// [`crate::Volume::open`], before the block size is known: 512 bytes at
+/// offset 0, then (for a larger sector size) the superblock's whole sector.
 #[async_trait]
 pub trait BlockDevice: Send + Sync {
     /// Total addressable size in bytes.
