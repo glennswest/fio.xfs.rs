@@ -37,8 +37,16 @@ its CLAUDE.md).
 - [ ] Issue #5 (P3) — write: create files and directories, allocate extents,
       update the B+trees (clean writes on an unmounted filesystem); stormblock
       needs it to seed XFS templates
+- [ ] Issue #9 (P3, docs) — the next item is stale: XFS media import is done
+      through the engine (stormblock#147); check it off
 - [ ] Registry import of XFS images (stormblock already reads XFS blanks
       with this crate; the registry is its repo's work)
+
+## Where things stand (2026-09-27)
+
+Docs refreshed from the code (24d3b60, sc-build passing). #1 was already closed.
+Issue comments mined: filed stormblock#198 (P2: its XFS import should refuse a
+dirty log, once #6 lands; proposed after #6) and #9 here. No work in progress.
 
 ## Things learned the hard way (issue #1)
 

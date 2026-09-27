@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-09-27
+- **docs:** CLAUDE.md: where things stand at the session restart; #9 in the work plan
 - **docs:** Second refresh from the code: README and crate docs say a dirty log is not detected (#6), how realtime files fail (#7), the lookup cost is #8, and what `Volume::open` refuses; CLAUDE.md work plan lists #6, #7 and #8
 - **docs:** Refreshed from the code: the crate description no longer promises writing (issue #5); how it ships (git tag, `cli` feature, no golden); which v5 checksums are checked; symlink-following and lookup cost; what `extract` creates; the first reads `Volume::open` makes; mkfs-xfs's on-disk layer (#4) in the work plan
 
