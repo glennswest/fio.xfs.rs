@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-09-28
+- **docs:** Fourth refresh from the code (no code changes since v0.2.0; README, crate docs and CLAUDE.md rechecked against the code and against stormblock's use of v0.2.0): README lists the by-inode API (`inode`, `read_inode_range`, `walk_each`, …) and `pack_tar`, `exists`, `get_xattr`, `read_link_bytes`; no docs promise found that the code does not keep, so no new issues
+
 ### 2026-09-27
 - **docs:** Third refresh from the code (no code changes since v0.2.0): README says XFS media import goes through stormblock's engine import (stormblock#147), which walks XFS with this crate; CLAUDE.md checks off the stale registry-import item (#9)
 - **docs:** CLAUDE.md: where things stand at the session restart; #9 in the work plan

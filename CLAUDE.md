@@ -43,12 +43,14 @@ its CLAUDE.md).
       media through that API. XFS for the registry's own PVC blank ladder
       (`pvc-ext4j-*`) is stormcos#91's decision, not work in this crate.
 
-## Where things stand (2026-09-27)
+## Where things stand (2026-09-28)
 
-Docs refreshed from the code again: no code has changed since v0.2.0
-(2026-09-25). README says how XFS images reach the crate (stormblock#147's
-engine import); #9 checked off and closed. Open: #6 (P2), #4, #5, #7, #8.
-No work in progress.
+Docs refreshed from the code a fourth time: no code has changed since v0.2.0
+(2026-09-25). Every README claim was checked against the code (open
+refusals, 40 symlink hops, 4 KiB holes, CLI) and against stormblock, which
+pins `tag = "v0.2.0"` and refuses XFS `seed` until #5. README now lists the
+by-inode API. No docs promise is unkept, so no new issues. Open: #6 (P2),
+#4, #5, #7, #8. No work in progress.
 
 ## Things learned the hard way (issue #1)
 

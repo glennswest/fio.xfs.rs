@@ -59,6 +59,13 @@ through its hash index, so one lookup in a very large directory costs a
 read of the whole directory (#8); `walk`, `pack_tar_to` and `extract` go by
 inode and do not pay that.
 
+Below the path API is one by inode, for callers that walk a tree
+themselves: `inode`, `extents`, `read_inode_range`, `read_dir_inode`,
+`symlink_target`, `xattrs_inode`, `stat_inode` and `resolve`; `walk_each`
+hands each name and its inode to a closure instead of collecting them;
+`pack_tar` returns the archive as a `Vec<u8>`. `exists`, `get_xattr` and
+`read_link_bytes` (a target that is not UTF-8) round out the path calls.
+
 Anything that implements `fio_xfs::BlockDevice` (`size` and `read_at`) can
 be read; `FileDevice` and `MemDevice` are provided.
 
