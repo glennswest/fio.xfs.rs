@@ -23,8 +23,9 @@ issue #5, and until then stormblock refuses `seed` on XFS templates.
 | Directories | short form, block, leaf and node |
 | Symlinks | inline and remote |
 | Extended attributes | short form, leaf and node, remote values; XFS ACLs shown as `system.posix_acl_*`; parent pointers hidden |
-| Not read | files on a realtime device — `walk` lists them, reading one is `Error::Unsupported` (#7); the log — read cleanly unmounted filesystems: a dirty log is **not detected**, so an image taken from a running or crashed system reads without warning and may be stale (#6) |
-| Refused at open | v4 without v2 directories; v5 with unknown incompatible features or `NEEDSREPAIR` set; any superblock that fails its checksum |
+| The log | checked, not replayed: `Volume::open` finds the log's head and tail as the kernel does before a mount, and opens only a filesystem whose last log record is an unmount record (#6). A log on its own device cannot be seen, so it is not checked (`LogState::External`) |
+| Not read | files on a realtime device — `walk` lists them, reading one is `Error::Unsupported` (#7) |
+| Refused at open | a dirty log — not cleanly unmounted, so changes may be in the log and not on disk (`Error::DirtyLog`; mount it once to replay it, or read it as it stands with `open_norecovery`); a log that cannot be made sense of (`Error::Corrupt`); v4 without v2 directories; v5 with unknown incompatible features or `NEEDSREPAIR` set; any superblock that fails its checksum |
 
 ## Library
 
@@ -50,6 +51,23 @@ let report = vol.pack_tar_to(fio_xfs::tar::Io::new(file), "/").await?;
 // owners only with `ExtractOptions { owner: true }` (needs root).
 vol.extract("/", dest, &Default::default()).await?;
 ```
+
+An image taken from a running or crashed system is refused rather than
+read stale:
+
+```rust
+match Volume::open(dev).await {
+    Err(fio_xfs::Error::DirtyLog { head, tail }) => { /* not cleanly unmounted */ }
+    r => { let vol = r?; /* vol.log_state() is Clean, or External */ }
+}
+
+// Read it anyway, as it stands on disk (like mounting with norecovery):
+// changes still in the log are not seen.
+let vol = Volume::open_norecovery(dev).await?;
+println!("{}", vol.log_state()); // clean | dirty (head H, tail T) | external | unreadable
+```
+
+Nothing here replays the log; the kernel does, on the next mount.
 
 Lookups resolve symlinks in the middle of a path (absolute targets from the
 image's root, at most 40 hops); `stat`, `lookup`, `read_link` and
@@ -86,9 +104,12 @@ it ships inside whatever links it.
 ## CLI
 
 All commands read `IMAGE` (a file or block device) and never write to it.
+A filesystem with a dirty log is refused; `--norecovery` reads it as it
+stands on disk, with a warning. `info` shows the log's state.
 
 ```
 fio-xfs IMAGE info
+fio-xfs IMAGE --norecovery COMMAND ...
 fio-xfs IMAGE ls [PATH]
 fio-xfs IMAGE stat PATH
 fio-xfs IMAGE cat PATH
@@ -110,13 +131,19 @@ need real tools and say so and pass when they are missing:
   and attribute values, devices; on v5 and v4, with and without `ftype`,
   bigtime and 64-bit extent counts, 1 KiB blocks with 8 KiB directory
   blocks, 2 KiB inodes and 16 AGs. The tar output is read by GNU tar too.
+  Every log is found clean, as `xfs_logprint` finds it; logs reformatted
+  by `xfs_db logformat` in later cycles are clean; a log whose unmount
+  record is broken is refused as dirty.
 - `tests/kernel.rs` — **the kernel is the judge**: the host's own kernel
   boots under qemu/KVM (no root) with the test binary as its init, mounts a
   fresh image and writes a tree through ordinary system calls — hard links,
   POSIX ACLs, xattrs up to 20 KB, 20 000-name directories, holes, unwritten
   and reflinked extents, device nodes, sockets, pre-1970 and post-2038
   nanosecond times, non-UTF-8 names — then every name is read back and
-  compared.
+  compared. Then a crash: the kernel writes and syncs and the VM powers off
+  without unmounting; the image is refused as dirty with the log head and
+  tail `xfs_logprint` reports, and after a second boot replays the log and
+  unmounts, it opens clean with every file written before the crash.
 
 They run on the build box through `sc-build`.
 

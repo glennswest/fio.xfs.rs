@@ -3,6 +3,13 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-06
+- **feat:** Dirty-log detection (#6): a new `log` module finds the log's head and tail as the kernel does before a mount (`xlog_find_head`, `xlog_find_tail`, `xlog_check_unmount_rec`) and says whether the last record is an unmount record. `Volume::log_state()` returns `LogState::{Clean, Dirty { head, tail }, External, Unreadable}`; `Superblock` gains `versionnum`, `log_start`, `log_blocks`, `has_logv2()` and `has_external_log()`
+- **BREAKING:** `Volume::open` refuses a filesystem that was not cleanly unmounted (`Error::DirtyLog { head, tail }`) or whose log cannot be made sense of (`Error::Corrupt`); `Volume::open_norecovery` opens either and reads it as it stands on disk. A log on its own device is not checked and not refused
+- **feat:** CLI: `info` shows the log's state; `--norecovery` reads a dirty filesystem, with a warning
+- **test:** the log is found clean on every mkfs image (agreeing with `xfs_logprint`) and after `xfs_db logformat` in later cycles; a broken unmount record is refused; the kernel test crashes a mount (no unmount) and the image is refused with `xfs_logprint`'s head and tail, then clean with every file after the kernel replays it; unit tests on hand-made logs (zeroed, partly written, wrapped, head at the end, a record wrapping the end, stray blocks past the head)
+- **docs:** README and crate docs: the log is checked, not replayed; what `open` refuses
+
 ### 2026-09-28
 - **docs:** Fourth refresh from the code (no code changes since v0.2.0; README, crate docs and CLAUDE.md rechecked against the code and against stormblock's use of v0.2.0): README lists the by-inode API (`inode`, `read_inode_range`, `walk_each`, …) and `pack_tar`, `exists`, `get_xattr`, `read_link_bytes`; no docs promise found that the code does not keep, so no new issues
 
