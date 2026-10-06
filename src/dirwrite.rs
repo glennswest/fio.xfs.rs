@@ -341,7 +341,8 @@ mod tests {
         assert_eq!(entsize(1), 16);
         assert_eq!(entsize(2), 16);
         assert_eq!(entsize(3), 16);
-        assert_eq!(entsize(4), 24);
+        assert_eq!(entsize(4), 16);
+        assert_eq!(entsize(5), 24);
     }
 
     #[test]

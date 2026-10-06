@@ -21,6 +21,7 @@ use crate::error::{corrupt, Error, Result};
 use crate::sb::Superblock;
 
 /// Owners of blocks that belong to no inode (`XFS_RMAP_OWN_*`).
+#[allow(dead_code)]
 pub mod owner {
     /// The AG headers.
     pub const FS: u64 = -3i64 as u64;
@@ -35,6 +36,7 @@ pub mod owner {
 }
 
 /// Reverse-mapping offset flags.
+#[allow(dead_code)]
 pub mod rmapf {
     /// The block is in the attribute fork.
     pub const ATTR: u64 = 1 << 63;
@@ -401,11 +403,6 @@ impl Ag {
     }
 
     // ---- free space --------------------------------------------------------
-
-    /// Free blocks in this AG.
-    pub fn free_blocks(&self) -> u64 {
-        self.free_total
-    }
 
     /// Blocks an ordinary allocation may still take.
     fn spare(&self) -> u64 {

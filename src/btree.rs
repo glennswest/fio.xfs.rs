@@ -299,8 +299,8 @@ mod tests {
 
     #[test]
     fn bmap_levels_stop_at_the_inode_root() {
-        // 4 KiB blocks hold 254 extents; a 336-byte fork's root holds 20.
+        // 4 KiB blocks hold 251 extents; a 336-byte fork's root holds 20.
         assert_eq!(bmap_level_sizes(30, 4096, 20), vec![1]);
-        assert_eq!(bmap_level_sizes(254 * 21, 4096, 20), vec![21, 1]);
+        assert_eq!(bmap_level_sizes(251 * 21, 4096, 20), vec![21, 1]);
     }
 }
