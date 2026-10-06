@@ -51,8 +51,9 @@ const NULL_AGINO: u32 = u32::MAX;
 /// `XSLM`, and a remote symlink block's header length.
 const SYMLINK_MAGIC: u32 = 0x5853_4c4d;
 const SYMLINK_HDR: usize = 56;
-/// The longest symlink target.
-const MAX_LINK: usize = 1024;
+/// The longest symlink target: `XFS_SYMLINK_MAXLEN` (1024) less one — the
+/// kernel refuses a target of that length and `xfs_repair` clears one.
+const MAX_LINK: usize = 1023;
 /// Largest write handed to the device at once.
 const CHUNK: usize = 1 << 20;
 
@@ -863,7 +864,7 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
-    /// Make a symbolic link at `path` pointing at `target`.
+    /// Make a symbolic link at `path` pointing at `target` (1 to 1023 bytes).
     pub async fn symlink(&mut self, path: &str, target: &str) -> Result<u64> {
         let target = target.as_bytes();
         if target.is_empty() || target.len() > MAX_LINK {

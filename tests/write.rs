@@ -47,7 +47,7 @@ fn repair_clean(img: &Image, when: &str) {
 }
 
 /// A long symlink target: past a 512-byte inode's fork, and past one 1 KiB
-/// block's payload.
+/// block's payload. XFS's longest is 1023 bytes.
 fn long_target(len: usize) -> String {
     let mut t = String::from("../");
     while t.len() < len {
@@ -101,7 +101,7 @@ async fn populate(vol: &mut Volume<FileDevice>, tree: &mut Tree, prefix: &str) {
 
     vol.mkdir(&p("links")).await.unwrap();
     tree.dir(p("links").trim_start_matches('/'));
-    for (name, target) in [("short", "../hello.txt".to_string()), ("long", long_target(900)), ("longest", long_target(1024)), ("abs", "/etc/x".into())] {
+    for (name, target) in [("short", "../hello.txt".to_string()), ("long", long_target(900)), ("longest", long_target(1023)), ("abs", "/etc/x".into())] {
         vol.symlink(&p(&format!("links/{name}")), &target).await.unwrap();
         tree.items.insert(p(&format!("links/{name}")).trim_start_matches('/').into(), Want::Symlink(target.into_bytes()));
     }
@@ -263,7 +263,7 @@ async fn v5_many_ags() {
     if skip() {
         return;
     }
-    round(&fresh(&["-d", "agcount=16"], 1024)).await;
+    round(&fresh(&["-d", "agcount=16"], 2048)).await;
 }
 
 #[tokio::test]
@@ -288,7 +288,7 @@ async fn fragmented_file_gets_a_bmap_btree() {
     // Fill the filesystem, free every other block of a run of one-block
     // files, and write into the holes: one extent per block, far more than
     // an inode holds, so the extents go in a B+tree.
-    let img = fresh(&["-d", "agcount=1"], 300);
+    let img = fresh(&[], 300);
     let mut vol = open_rw(&img).await;
     let bs = vol.superblock().block_size as usize;
     let mut tree = Tree::default();
@@ -394,6 +394,7 @@ async fn errors() {
     assert!(matches!(vol.write("/d/f/g", b"x").await, Err(Error::NotADirectory(_))));
     assert!(matches!(vol.unlink("/d/none").await, Err(Error::NotFound(_))));
     assert!(matches!(vol.mkdir("/").await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.symlink("/too-long", &"x".repeat(1024)).await, Err(Error::InvalidPath(_))));
     // Reads in the middle see what was written.
     assert_eq!(vol.read("/d/f").await.unwrap(), b"x");
     assert_eq!(vol.read_dir("/d").await.unwrap().len(), 1);
