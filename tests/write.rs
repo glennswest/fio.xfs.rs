@@ -301,10 +301,7 @@ async fn fragmented_file_gets_a_bmap_btree() {
     let mut n = 0;
     while size >= bs {
         match vol.write(&format!("/fill-{n}"), &vec![0u8; size]).await {
-            Ok(_) => {
-                tree.file(&format!("fill-{n}"), vec![0u8; size]);
-                n += 1;
-            }
+            Ok(_) => n += 1,
             Err(Error::NoSpace(_)) => size /= 2,
             Err(e) => panic!("{e}"),
         }
@@ -319,6 +316,10 @@ async fn fragmented_file_gets_a_bmap_btree() {
     let data = bytes(77, 500 * bs);
     vol.write("/frag-file", &data).await.unwrap();
     tree.file("frag-file", data);
+    // The space it filled is not needed any more.
+    for i in 0..n {
+        vol.unlink(&format!("/fill-{i}")).await.unwrap();
+    }
     vol.flush().await.unwrap();
     drop(vol);
     repair_clean(&img, "after writing a fragmented file");
@@ -403,9 +404,9 @@ async fn errors() {
     // Filling the filesystem fails cleanly, and what was written before
     // still checks out.
     let mut vol = open_rw(&img).await;
-    let mut n = 0;
+    let mut n = 0u32;
     let err = loop {
-        match vol.write(&format!("/fill-{n}"), &bytes(n, 8 << 20)).await {
+        match vol.write(&format!("/fill-{n}"), &vec![n as u8; 8 << 20]).await {
             Ok(_) => n += 1,
             Err(e) => break e,
         }

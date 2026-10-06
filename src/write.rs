@@ -651,12 +651,10 @@ impl<D: BlockDevice> Volume<D> {
             let mut parent = dino;
             let mut names = BTreeMap::new();
             for e in self.dir_entries(&dir).await? {
-                match &e.name[..] {
-                    b"." => {}
-                    b".." => parent = e.ino,
-                    _ => {
-                        names.insert(e.name, (e.ino, e.ftype.code()));
-                    }
+                if e.name == b".." {
+                    parent = e.ino;
+                } else if e.name != b"." {
+                    names.insert(e.name, (e.ino, e.ftype.code()));
                 }
             }
             self.w().dirs.insert(dino, DirState { parent, names });
