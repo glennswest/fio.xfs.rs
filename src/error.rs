@@ -15,6 +15,17 @@ pub enum Error {
     #[error("corrupt filesystem: {0}")]
     Corrupt(String),
 
+    /// The filesystem was not cleanly unmounted: its log holds changes that
+    /// may not be on disk, so what is on disk may be stale. Mounting it once
+    /// replays the log; [`crate::Volume::open_norecovery`] reads it anyway.
+    #[error("the log is dirty (head {head}, tail {tail}): the filesystem was not cleanly unmounted, and what is on disk may be stale; mount it once to replay the log")]
+    DirtyLog {
+        /// Where the next log write would go, in 512-byte blocks into the log.
+        head: u64,
+        /// The oldest record whose changes may not be on disk.
+        tail: u64,
+    },
+
     /// The filesystem uses something this implementation cannot read.
     #[error("unsupported: {0}")]
     Unsupported(String),

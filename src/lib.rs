@@ -31,9 +31,11 @@
 //! Linux presents them (`system.posix_acl_*`); bigtime timestamps and
 //! 64-bit extent counters.
 //!
-//! What it does not: files on a realtime device, and replaying the log —
-//! read a filesystem that was cleanly unmounted. A dirty log is not
-//! detected either: such an image opens and reads as it stands on disk.
+//! What it does not: files on a realtime device, and replaying the log.
+//! [`Volume::open`] looks at the log and refuses a filesystem that was not
+//! cleanly unmounted ([`Error::DirtyLog`]): what is on disk may be stale.
+//! [`Volume::open_norecovery`] reads one anyway, as it stands on disk, and
+//! [`Volume::log_state`] says how the log was found.
 //!
 //! # Getting a tree out
 //!
@@ -56,6 +58,7 @@ pub mod dir;
 pub mod error;
 pub mod export;
 pub mod inode;
+pub mod log;
 pub mod sb;
 pub mod tar;
 pub mod volume;
@@ -66,5 +69,6 @@ pub use dir::FileType;
 pub use error::{Error, Result};
 pub use export::{ExtractOptions, ExtractReport, PackReport};
 pub use inode::{Inode, Timestamp};
+pub use log::LogState;
 pub use sb::Superblock;
 pub use volume::{Entry, Stat, Volume, WalkEntry};

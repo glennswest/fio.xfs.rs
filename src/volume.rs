@@ -8,6 +8,7 @@ use crate::device::BlockDevice;
 use crate::dir::{self, FileType, RawEntry};
 use crate::error::{corrupt, Error, Result};
 use crate::inode::{mode, Format, Inode, Timestamp};
+use crate::log::{self, LogState};
 use crate::sb::Superblock;
 
 /// Symbolic links followed while resolving one path, as Linux allows.
@@ -100,16 +101,36 @@ pub struct WalkEntry {
 
 /// An open XFS filesystem.
 ///
-/// Reading only, for now: the filesystem is expected to be cleanly
-/// unmounted, since nothing here replays the log.
+/// Reading only, for now. Nothing here replays the log, so
+/// [`Volume::open`] opens only a filesystem that was cleanly unmounted.
 pub struct Volume<D: BlockDevice> {
     dev: D,
     sb: Superblock,
+    log: LogState,
 }
 
 impl<D: BlockDevice> Volume<D> {
-    /// Open the filesystem on `device`, checking its superblock.
+    /// Open the filesystem on `device`, checking its superblock and its log.
+    ///
+    /// A filesystem that was not cleanly unmounted is refused with
+    /// [`Error::DirtyLog`], and one whose log cannot be made sense of with
+    /// [`Error::Corrupt`]: in both, changes may be in the log and not yet on
+    /// disk. A log on a device of its own cannot be checked and is not
+    /// refused; [`Volume::log_state`] says [`LogState::External`].
     pub async fn open(device: D) -> Result<Self> {
+        let vol = Self::open_norecovery(device).await?;
+        match &vol.log {
+            LogState::Dirty { head, tail } => Err(Error::DirtyLog { head: *head, tail: *tail }),
+            LogState::Unreadable(why) => Err(Error::Corrupt(format!("log: {why}"))),
+            LogState::Clean | LogState::External => Ok(vol),
+        }
+    }
+
+    /// Open the filesystem on `device` whatever its log says, and read it as
+    /// it stands on disk — like mounting with `norecovery`. Changes still in
+    /// the log are not seen, so a dirty filesystem may read stale or
+    /// inconsistent; [`Volume::log_state`] says whether it is.
+    pub async fn open_norecovery(device: D) -> Result<Self> {
         let mut buf = vec![0u8; 512];
         if device.size() < 512 {
             return Err(Error::NotXfs("device smaller than a sector".into()));
@@ -131,7 +152,17 @@ impl<D: BlockDevice> Volume<D> {
                 device.size()
             )));
         }
-        Ok(Volume { dev: device, sb })
+        let log = match log::state(&device, &sb).await {
+            Ok(state) => state,
+            Err(Error::Corrupt(why)) => LogState::Unreadable(why),
+            Err(e) => return Err(e),
+        };
+        Ok(Volume { dev: device, sb, log })
+    }
+
+    /// How the log was found when the filesystem was opened.
+    pub fn log_state(&self) -> &LogState {
+        &self.log
     }
 
     /// The superblock.

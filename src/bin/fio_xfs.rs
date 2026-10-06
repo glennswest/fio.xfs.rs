@@ -14,6 +14,10 @@ use tokio::io::AsyncWriteExt;
 struct Cli {
     /// The image or block device.
     image: PathBuf,
+    /// Read a filesystem that was not cleanly unmounted, as it stands on
+    /// disk; changes still in its log are not seen.
+    #[arg(long, global = true)]
+    norecovery: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -79,7 +83,10 @@ fn kind_char(k: FileType) -> char {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let dev = FileDevice::open(&cli.image).await.with_context(|| format!("opening {}", cli.image.display()))?;
-    let vol = Volume::open(dev).await?;
+    let vol = if cli.norecovery { Volume::open_norecovery(dev).await? } else { Volume::open(dev).await? };
+    if !vol.log_state().is_clean() && !matches!(cli.cmd, Cmd::Info) {
+        eprintln!("fio-xfs: warning: log {}", vol.log_state());
+    }
     let mut out = tokio::io::stdout();
     match cli.cmd {
         Cmd::Info => {
@@ -100,6 +107,7 @@ async fn main() -> Result<()> {
             println!("ftype          {}", sb.has_ftype());
             println!("incompat       {:#x}", sb.features_incompat);
             println!("ro_compat      {:#x}", sb.features_ro_compat);
+            println!("log            {}", vol.log_state());
         }
         Cmd::Ls { path } => {
             let mut entries = vol.read_dir(&path).await?;

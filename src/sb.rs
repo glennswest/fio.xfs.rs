@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 pub const MAGIC: u32 = 0x5846_5342;
 
 // Version 4 feature bits, in `versionnum`.
+const VERSION_LOGV2: u16 = 0x0400;
 const VERSION_DIRV2: u16 = 0x2000;
 const VERSION_MOREBITS: u16 = 0x8000;
 // Version 4 `features2` bits.
@@ -91,6 +92,12 @@ pub struct Superblock {
     pub features_ro_compat: u32,
     /// Incompatible features (v5).
     pub features_incompat: u32,
+    /// The version number with its feature bits, as stored.
+    pub versionnum: u16,
+    /// First block of the internal log; 0 when the log is on its own device.
+    pub log_start: u64,
+    /// Blocks in the log.
+    pub log_blocks: u32,
 }
 
 
@@ -135,6 +142,9 @@ impl Superblock {
             features_compat: if version == 5 { be32(buf, 208) } else { 0 },
             features_ro_compat: if version == 5 { be32(buf, 212) } else { 0 },
             features_incompat: if version == 5 { be32(buf, 216) } else { 0 },
+            versionnum,
+            log_start: be64(buf, 48),
+            log_blocks: be32(buf, 96),
         };
 
         match version {
@@ -198,6 +208,16 @@ impl Superblock {
         } else {
             self.features2 & FEATURES2_FTYPE != 0
         }
+    }
+
+    /// Whether the log is version 2 (log stripe units, records over 32 KiB).
+    pub fn has_logv2(&self) -> bool {
+        self.is_v5() || self.versionnum & VERSION_LOGV2 != 0
+    }
+
+    /// Whether the log is on a device of its own, not inside this one.
+    pub fn has_external_log(&self) -> bool {
+        self.log_start == 0
     }
 
     /// Whether directories carry parent pointers as attributes.
