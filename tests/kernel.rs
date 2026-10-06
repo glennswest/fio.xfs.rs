@@ -11,6 +11,12 @@
 //! not UTF-8 — unmounts cleanly and powers off. Back on the host, every name
 //! is read back and compared, and the tar stream is checked too.
 //!
+//! Then a crash: the VM mounts a fresh image, writes, syncs and powers off
+//! without unmounting. The log is dirty and `Volume::open` must refuse it,
+//! with the head and tail `xfs_logprint` finds. A second boot mounts it (the
+//! kernel replays the log) and unmounts cleanly, and then it opens and
+//! everything written before the crash is there.
+//!
 //! Needs `/dev/kvm`, `qemu-system-x86_64`, `mkfs.xfs` and a readable kernel
 //! and modules for the running kernel; without them it says what is missing
 //! and passes. No root: the VM is root inside, the host side never is.
@@ -24,6 +30,17 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const DONE: &str = "FIO-XFS-POPULATED";
+
+/// On the kernel command line: what the guest does instead of populating.
+const CRASH: &str = "fioxfs.crash";
+const REMOUNT: &str = "fioxfs.remount";
+
+/// Files the crash run writes, under `crash/`.
+const CRASH_FILES: usize = 200;
+
+fn crash_data(i: usize) -> Vec<u8> {
+    bytes(50_000 + i as u64, 100 + i * 37)
+}
 
 // ---- the tree ---------------------------------------------------------------
 
@@ -303,11 +320,31 @@ mod guest {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        let m = cstr(b"/mnt");
+        if cmdline.split_whitespace().any(|w| w == CRASH) {
+            // Write, push it all to the disk, and stop without unmounting:
+            // the log is left without an unmount record.
+            mount("/dev/vda", "/mnt", "xfs", "");
+            check("mkdir crash", unsafe { libc::mkdir(cstr(b"/mnt/crash").as_ptr(), 0o755) });
+            for i in 0..CRASH_FILES {
+                std::fs::write(format!("/mnt/crash/file-{i:04}"), crash_data(i)).unwrap();
+            }
+            unsafe { libc::sync() };
+            println!("{DONE}");
+            power_off();
+        }
+        if cmdline.split_whitespace().any(|w| w == REMOUNT) {
+            // Mounting replays the log; unmounting leaves it clean.
+            mount("/dev/vda", "/mnt", "xfs", "");
+            check("umount", unsafe { libc::umount(m.as_ptr()) });
+            println!("{DONE}");
+            power_off();
+        }
         // No speculative preallocation past EOF, so the sparse file's holes
         // are the ones it was written with.
         mount("/dev/vda", "/mnt", "xfs", "allocsize=4k");
         populate(Path::new("/mnt"));
-        let m = cstr(b"/mnt");
         check("umount", unsafe { libc::umount(m.as_ptr()) });
         println!("{DONE}");
         power_off();
@@ -526,14 +563,15 @@ fn decompress(tool: &str, file: &Path) -> Result<Vec<u8>, String> {
     Ok(o.stdout)
 }
 
-fn boot(kernel: &Path, initrd: &Path, image: &Path) -> Result<String, String> {
+fn boot(kernel: &Path, initrd: &Path, image: &Path, mode: &str) -> Result<String, String> {
     let mut child = Command::new("qemu-system-x86_64")
         .args(["-enable-kvm", "-cpu", "host", "-m", "1024", "-smp", "2", "-nographic", "-no-reboot"])
         .arg("-kernel")
         .arg(kernel)
         .arg("-initrd")
         .arg(initrd)
-        .args(["-append", "console=ttyS0 panic=-1 rdinit=/init selinux=0 quiet"])
+        .arg("-append")
+        .arg(format!("console=ttyS0 panic=-1 rdinit=/init selinux=0 quiet {mode}"))
         .arg("-drive")
         .arg(format!("file={},format=raw,if=virtio,cache=unsafe", image.display()))
         .stdin(Stdio::null())
@@ -591,7 +629,7 @@ fn main() {
         assert!(o.status.success(), "mkfs.xfs: {}", String::from_utf8_lossy(&o.stderr));
 
         let t = Instant::now();
-        let console = boot(&kernel, &initrd, &image).expect("boot");
+        let console = boot(&kernel, &initrd, &image, "").expect("boot");
         if !console.contains(DONE) {
             let tail: Vec<&str> = console.lines().rev().take(60).collect();
             panic!("{label}: the VM did not finish populating:\n{}", tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
@@ -607,7 +645,71 @@ fn main() {
         rt.block_on(verify(&image));
         println!("{label}: every name read back and matched");
     }
-    println!("test result: ok. kernel-populated images verified");
+
+    crash(&kernel, &initrd, dir.path());
+    println!("test result: ok. kernel-populated images verified, a crashed one refused");
+}
+
+fn boot_ok(kernel: &Path, initrd: &Path, image: &Path, mode: &str) {
+    let console = boot(kernel, initrd, image, mode).expect("boot");
+    if !console.contains(DONE) {
+        let tail: Vec<&str> = console.lines().rev().take(60).collect();
+        panic!("{mode}: the VM did not finish:\n{}", tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+    }
+}
+
+/// What `xfs_logprint -t` says of the log: clean or not, head and tail.
+fn logprint(image: &Path) -> Option<(bool, u64, u64)> {
+    let o = Command::new("xfs_logprint").args(["-t", "-f"]).arg(image).output().ok()?;
+    let text = String::from_utf8_lossy(&o.stdout).into_owned();
+    let line = text.lines().find(|l| l.contains("log tail:"))?;
+    let num = |key: &str| -> Option<u64> {
+        let rest = &line[line.find(key)? + key.len()..];
+        rest.split_whitespace().next()?.parse().ok()
+    };
+    Some((line.contains("<CLEAN>"), num("head:")?, num("tail:")?))
+}
+
+/// A mount that never unmounted is refused; once the kernel has replayed
+/// its log, it reads.
+fn crash(kernel: &Path, initrd: &Path, dir: &Path) {
+    use fio_xfs::{Error, FileDevice, LogState, Volume};
+    let image = dir.join("crash.xfs");
+    std::fs::File::create(&image).unwrap().set_len(1 << 30).unwrap();
+    let o = Command::new("mkfs.xfs").args(["-q", "-f"]).arg(&image).output().unwrap();
+    assert!(o.status.success(), "mkfs.xfs: {}", String::from_utf8_lossy(&o.stderr));
+    boot_ok(kernel, initrd, &image, CRASH);
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let (head, tail) = rt.block_on(async {
+        let r = Volume::open(FileDevice::open(&image).await.unwrap()).await;
+        let Err(Error::DirtyLog { head, tail }) = r else {
+            panic!("crashed: Volume::open gave {:?}, not DirtyLog", r.map(|v| v.log_state().clone()));
+        };
+        let vol = Volume::open_norecovery(FileDevice::open(&image).await.unwrap()).await.unwrap();
+        assert_eq!(vol.log_state(), &LogState::Dirty { head, tail });
+        (head, tail)
+    });
+    println!("crashed: refused, log dirty from {tail} to {head}");
+    if let Some((clean, h, t)) = logprint(&image) {
+        assert!(!clean, "xfs_logprint says the crashed log is clean");
+        assert_eq!((head, tail), (h, t), "head and tail as xfs_logprint finds them");
+        println!("crashed: xfs_logprint agrees (head {h}, tail {t})");
+    }
+
+    boot_ok(kernel, initrd, &image, REMOUNT);
+    rt.block_on(async {
+        let vol = Volume::open(FileDevice::open(&image).await.unwrap()).await.unwrap();
+        assert_eq!(vol.log_state(), &LogState::Clean);
+        for i in 0..CRASH_FILES {
+            let got = vol.read(&format!("/crash/file-{i:04}")).await.unwrap();
+            assert!(got == crash_data(i), "crash/file-{i:04} after replay");
+        }
+    });
+    if let Some((clean, _, _)) = logprint(&image) {
+        assert!(clean, "xfs_logprint says the replayed log is dirty");
+    }
+    println!("crashed: after the kernel replayed the log, clean and every file read back");
 }
 
 async fn verify(image: &Path) {

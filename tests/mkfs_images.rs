@@ -10,7 +10,7 @@ use std::process::Command;
 
 use common::{build, bytes, dir_form, have, run, sparse, AttrValue, Image, Tree, Want};
 use fio_xfs::inode::Format;
-use fio_xfs::{Error, ExtractOptions, FileType, Volume};
+use fio_xfs::{Error, ExtractOptions, FileType, LogState, Volume};
 
 /// A symlink target too long for a 512-byte inode.
 ///
@@ -97,6 +97,8 @@ fn skip() -> bool {
 async fn verify(img: &Image, tree: &Tree) {
     img.check();
     let vol = img.open().await;
+    assert_eq!(vol.log_state(), &LogState::Clean);
+    assert_ne!(logprint_clean(img), Some(false), "xfs_logprint says the log is dirty");
 
     let walked: BTreeMap<String, _> =
         vol.walk("/").await.unwrap().into_iter().map(|e| (e.path.clone(), e)).collect();
@@ -495,4 +497,71 @@ async fn corruption_is_caught() {
     // Something that is not XFS at all.
     let r = Volume::open(fio_xfs::MemDevice::new(vec![0u8; 1 << 20])).await;
     assert!(matches!(r, Err(Error::NotXfs(_))));
+}
+
+/// Whether `xfs_logprint -t` finds the log clean; `None` without it.
+fn logprint_clean(img: &Image) -> Option<bool> {
+    if !have("xfs_logprint") {
+        return None;
+    }
+    let o = Command::new("xfs_logprint").args(["-t", "-f"]).arg(&img.path).output().unwrap();
+    let text = String::from_utf8_lossy(&o.stdout).into_owned();
+    let line = text.lines().find(|l| l.contains("log tail:")).unwrap_or_else(|| panic!("xfs_logprint: {text}"));
+    Some(line.contains("<CLEAN>"))
+}
+
+#[tokio::test]
+async fn reformatted_log_in_a_later_cycle_is_clean() {
+    if skip() {
+        return;
+    }
+    let mut tree = Tree::default();
+    tree.file("a", b"abc".to_vec());
+    for cycle in [2, 3, 9] {
+        let img = build(&tree, &[], 300);
+        run(Command::new("xfs_db").args(["-x", "-c", &format!("logformat -c {cycle}")]).arg(&img.path));
+        let vol = img.open().await;
+        assert_eq!(vol.log_state(), &LogState::Clean, "cycle {cycle}");
+        assert_eq!(vol.read("/a").await.unwrap(), b"abc");
+        assert_ne!(logprint_clean(&img), Some(false), "xfs_logprint, cycle {cycle}");
+    }
+}
+
+#[tokio::test]
+async fn log_without_an_unmount_record_is_refused() {
+    if skip() {
+        return;
+    }
+    let mut tree = Tree::default();
+    tree.file("a", b"abc".to_vec());
+    for opts in [&[][..], &["-m", "crc=0"][..], &["-b", "size=1024"][..]] {
+        let img = build(&tree, opts, 300);
+        let vol = img.open().await;
+        let sb = vol.superblock().clone();
+        drop(vol);
+        assert!(!sb.has_external_log() && sb.log_blocks > 0);
+        let start = sb.fsb_to_byte(sb.log_start).unwrap() as usize;
+        let bbs = (sb.log_blocks as usize) << (sb.block_log - 9);
+
+        // Take the unmount flag off every unmount record mkfs wrote.
+        let mut data = std::fs::read(&img.path).unwrap();
+        let mut cleared = 0;
+        for bb in 0..bbs {
+            let at = start + bb * 512;
+            let h = &data[at..at + 512];
+            let one_op = u32::from_be_bytes(h[40..44].try_into().unwrap()) == 1;
+            if h[..4] == [0xfe, 0xed, 0xba, 0xbe] && one_op && bb + 1 < bbs && data[at + 512 + 9] & 0x20 != 0 {
+                data[at + 512 + 9] &= !0x20;
+                cleared += 1;
+            }
+        }
+        assert!(cleared > 0, "{opts:?}: no unmount record in a fresh log");
+
+        let r = Volume::open(fio_xfs::MemDevice::new(data.clone())).await;
+        assert!(matches!(r, Err(Error::DirtyLog { .. })), "{opts:?}: {:?}", r.map(|v| v.log_state().clone()));
+        let vol = Volume::open_norecovery(fio_xfs::MemDevice::new(data)).await.unwrap();
+        assert!(matches!(vol.log_state(), LogState::Dirty { .. }), "{opts:?}");
+        // Read as it stands on disk, which here is all of it.
+        assert_eq!(vol.read("/a").await.unwrap(), b"abc");
+    }
 }
