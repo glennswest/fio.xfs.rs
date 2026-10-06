@@ -100,6 +100,10 @@ In progress: #5 (write), see the work plan.
   before the head is an unmount record (one op, flag `0x20`). `xfs_logprint
   -f` means "this file *is* the log": run `xfs_logprint -t IMAGE` instead.
   A crash in the kernel test is `sync()` then power off without umount.
+- **The testhost boot VM (#12):** `tests/vm/` builds a UEFI disk through
+  sc-build (`SC_BUILD_OUT`), booted by `stormcentral testhost boot
+  nanatest1` (fio.xfs.rs is in its project list). The guest runs dev's
+  `mkfs.xfs`/`xfs_repair` copied in with their libraries.
 - **Kernel tests without root:** dev's `/dev/kvm` is world-writable and the
   kernel and modules are readable, so `tests/kernel.rs` boots
   `/boot/vmlinuz-$(uname -r)` (or `/lib/modules/$(uname -r)/vmlinuz`) with an initramfs whose `/init` is the

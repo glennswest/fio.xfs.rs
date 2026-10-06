@@ -193,6 +193,28 @@ that need real tools and say so and pass when they are missing:
 
 They run on the build box through `sc-build`.
 
+**The kernel in a throwaway VM (#12).** `tests/vm/build-image.sh` (run by
+sc-build) makes a UEFI disk image: the UEFI Shell starts the build box's
+kernel with a busybox initramfs holding the xfs and loop modules, xfsprogs'
+`mkfs.xfs` and `xfs_repair`, and `examples/vm_verify.rs`. Its init
+(`tests/vm/init.sh`) runs seven geometries (512 MB – 2 GiB; 1, 4 and 16 KiB
+blocks; 8 KiB directory blocks; 2 KiB inodes; 4 KiB sectors; 16 AGs; every
+optional feature off): `mkfs.xfs`, then this crate writes a tree with a
+manifest, `xfs_repair -n`, the kernel loop-mounts it and checks every name in
+the manifest (contents by md5, mode, owner, link count, symlink targets,
+device numbers, directory sizes), then adds and removes names in every
+directory form and copies a file in, `xfs_repair -n`, this crate reads the
+kernel's changes back and writes again over them, `xfs_repair -n`, and the
+kernel checks the second manifest. It prints `VERIFY PASS` or
+`VERIFY FAIL <why>` on serial; stormcentral boots it on a fresh pve VM and
+destroys the VM after. No root anywhere.
+
+    SC_BUILD_OUT=tmp/fio-xfs-verify.img SC_BUILD_OUT_TO=tmp/fio-xfs-verify.img \
+      sc-build 'tests/vm/build-image.sh tmp/fio-xfs-verify.img'
+    stormcentral testhost boot nanatest1 --image tmp/fio-xfs-verify.img \
+      --expect 'VERIFY PASS' --fail 'VERIFY FAIL' --timeout 900 \
+      --url http://stormcentral.g8.lo
+
 ## Licence
 
 MIT OR Apache-2.0.

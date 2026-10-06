@@ -8,6 +8,7 @@
 - **feat:** `BlockDevice::write_at` and `flush` (provided; a device that does not implement them is read-only), `FileDevice::open_rw`, `MemDevice` writable
 - **feat:** `Superblock` gains `meta_uuid`, `inode_align`, `spino_align`, `imax_pct`, `features_log_incompat`, feature helpers and AG/inode number conversions; `FileType::code`/`from_ftype`; `Extent::encode`; `crc::stamp`
 - **BREAKING:** `Error` gains `Exists`, `NotEmpty`, `NoSpace`
+- **test:** kernel verification in a throwaway VM (#12): `tests/vm/build-image.sh` and `tests/vm/init.sh` (after mkfs.xfs.rs#11), `examples/vm_verify.rs`; run with `stormcentral testhost boot nanatest1`
 - **test:** `write::v5_big_inodes` expects the 40-name directory in short form when 2 KiB inodes hold it (#14)
 - **fix:** a symlink target may be at most 1023 bytes, as the kernel and `xfs_repair` require (`symlink` allowed 1024) (#5)
 - **fix:** unit tests `dirwrite::tests::entry_sizes` and `btree::tests::bmap_levels_stop_at_the_inode_root` expected the wrong values (a 4-byte name's entry rounds to 16 bytes; a 4 KiB bmap block holds 251 records) (#11)
