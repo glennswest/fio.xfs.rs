@@ -38,9 +38,27 @@ its CLAUDE.md).
       and tail, clean after the kernel replays it. stormblock#198 consumes it.
 - [ ] Issue #7 (P3) — realtime-device files: `read_inode_range` returns
       `Unsupported` for `XFS_DIFLAG_REALTIME` inodes
-- [ ] Issue #5 (P3) — write: create files and directories, allocate extents,
-      update the B+trees (clean writes on an unmounted filesystem); stormblock
-      needs it to seed XFS templates
+- [ ] Issue #5 — write (IN PROGRESS, 2026-10-06): stormblock seeds XFS
+      templates with it (`mkdir_all` + `write` + `flush`, as with fio-ext4).
+      Plan, v5 (CRC) filesystems only (mkfs-xfs makes nothing else; v4 is
+      refused with `Unsupported`):
+      - `BlockDevice::write_at`/`flush` (provided methods; read-only devices
+        say `Unsupported`), `FileDevice::open_rw`, writable `MemDevice`.
+      - `alloc` module: per-AG state loaded on first write (free extents
+        from the bnobt, inobt records, rmap records, every block of the
+        bno/cnt/rmap/inobt/finobt trees). Extents and inode chunks come out
+        of it in memory.
+      - File data and inodes are written through; directories are kept as
+        entry lists and serialised at `flush` in whichever form fits
+        (short form, block, leaf, node), so a big directory costs one write.
+      - `flush` rebuilds each touched AG's bno/cnt/rmap/inobt/finobt trees
+        from the in-memory records (bulk load, as xfs_repair phase 5 does),
+        then the AGF, AGI and superblock counters.
+      - API: write/write_with, mkdir(_with), mkdir_all(_with), symlink,
+        mknod, link, unlink, rmdir, chmod, chown, set_time, flush.
+      - Not in this round: xattrs, rename, append/write_at, reflinked files.
+      - Verified by `xfs_repair -n` on every image written, by reading back,
+        and by the kernel test mounting a written image.
 - [x] Issue #9 — XFS media import (2026-09-27): done in stormblock#147, not
       here. The engine's `POST /api/v1/volumes/import` walks XFS (whole
       volumes and GPT partitions) with this crate; stormblock-registry imports
@@ -50,7 +68,7 @@ its CLAUDE.md).
 ## Where things stand (2026-10-06)
 
 v0.3.0: dirty-log detection (#6) done and tagged. Open: #4, #5, #7, #8.
-No work in progress.
+In progress: #5 (write), see the work plan.
 
 ## Things learned the hard way (issue #1)
 
