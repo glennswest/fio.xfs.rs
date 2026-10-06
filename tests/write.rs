@@ -194,6 +194,12 @@ async fn verify_forms(img: &Image, prefix: &str) {
     assert_eq!(sf.format, Format::Local, "sf");
     for (dir, form) in [("block", "block"), ("leaf", "leaf"), ("node", "node")] {
         let inode = vol.inode(vol.lookup(&at(dir)).await.unwrap()).await.unwrap();
+        // 2 KiB inodes hold 40 names in short form, as the kernel would keep
+        // them.
+        if dir == "block" && vol.superblock().inode_size >= 2048 {
+            assert_eq!(inode.format, Format::Local, "{dir} in a 2 KiB inode");
+            continue;
+        }
         let ext = vol.extents(&inode, false).await.unwrap();
         assert_eq!(dir_form(&ext, bl), form, "{dir}");
     }
