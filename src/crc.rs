@@ -42,6 +42,14 @@ pub fn verify(buf: &[u8], off: usize) -> bool {
     !c == stored
 }
 
+/// Store the checksum of `buf` at `off`, little-endian, computed with the
+/// field zeroed — the inverse of [`verify`].
+pub fn stamp(buf: &mut [u8], off: usize) {
+    buf[off..off + 4].fill(0);
+    let c = crc32c(buf);
+    buf[off..off + 4].copy_from_slice(&c.to_le_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +69,7 @@ mod tests {
         assert!(verify(&buf, 8));
         buf[20] ^= 1;
         assert!(!verify(&buf, 8));
+        stamp(&mut buf, 8);
+        assert!(verify(&buf, 8));
     }
 }
