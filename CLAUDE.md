@@ -30,8 +30,15 @@ its CLAUDE.md).
       O(size) per path component in a huge directory
 - [ ] Issue #4 — share mkfs-xfs's on-disk layer (format constants, CRC,
       device trait) rather than a second copy
-- [ ] Issue #6 (P2) — detect a dirty log (log head/tail from the record
-      headers) and refuse or report it; `Volume::open` never looks at the log
+- [ ] Issue #6 (P2) — detect a dirty log — IN PROGRESS (2026-10-06):
+      `log` module ports the kernel's `xlog_find_head`/`xlog_find_tail`
+      (cycle binary search, verify windows, back up to a record header,
+      unmount-record check); `Volume::open` refuses `Error::DirtyLog`,
+      `Volume::open_norecovery` reads as-is, `Volume::log_state()`; CLI
+      `info` shows it, `--norecovery` flag. Tests: mkfs images are clean
+      (cross-checked with `xfs_logprint -t`), a broken unmount record is
+      dirty, the kernel test crashes a mount (no unmount) → dirty.
+      Breaking (open refuses more) → v0.3.0.
 - [ ] Issue #7 (P3) — realtime-device files: `read_inode_range` returns
       `Unsupported` for `XFS_DIFLAG_REALTIME` inodes
 - [ ] Issue #5 (P3) — write: create files and directories, allocate extents,
