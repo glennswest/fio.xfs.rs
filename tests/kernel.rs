@@ -660,7 +660,7 @@ fn boot_ok(kernel: &Path, initrd: &Path, image: &Path, mode: &str) {
 
 /// What `xfs_logprint -t` says of the log: clean or not, head and tail.
 fn logprint(image: &Path) -> Option<(bool, u64, u64)> {
-    let o = Command::new("xfs_logprint").args(["-t", "-f"]).arg(image).output().ok()?;
+    let o = Command::new("xfs_logprint").arg("-t").arg(image).output().ok()?;
     let text = String::from_utf8_lossy(&o.stdout).into_owned();
     let line = text.lines().find(|l| l.contains("log tail:"))?;
     let num = |key: &str| -> Option<u64> {

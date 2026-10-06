@@ -504,7 +504,7 @@ fn logprint_clean(img: &Image) -> Option<bool> {
     if !have("xfs_logprint") {
         return None;
     }
-    let o = Command::new("xfs_logprint").args(["-t", "-f"]).arg(&img.path).output().unwrap();
+    let o = Command::new("xfs_logprint").arg("-t").arg(&img.path).output().unwrap();
     let text = String::from_utf8_lossy(&o.stdout).into_owned();
     let line = text.lines().find(|l| l.contains("log tail:")).unwrap_or_else(|| panic!("xfs_logprint: {text}"));
     Some(line.contains("<CLEAN>"))
