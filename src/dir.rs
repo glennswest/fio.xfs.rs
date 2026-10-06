@@ -43,7 +43,8 @@ pub enum FileType {
 }
 
 impl FileType {
-    fn from_ftype(v: u8) -> Self {
+    /// The type a directory entry's `ftype` byte names.
+    pub fn from_ftype(v: u8) -> Self {
         match v {
             1 => FileType::File,
             2 => FileType::Directory,
@@ -53,6 +54,20 @@ impl FileType {
             6 => FileType::Socket,
             7 => FileType::Symlink,
             _ => FileType::Unknown,
+        }
+    }
+
+    /// The `ftype` byte a directory entry stores for this type.
+    pub fn code(&self) -> u8 {
+        match self {
+            FileType::Unknown => 0,
+            FileType::File => 1,
+            FileType::Directory => 2,
+            FileType::CharDevice => 3,
+            FileType::BlockDevice => 4,
+            FileType::Fifo => 5,
+            FileType::Socket => 6,
+            FileType::Symlink => 7,
         }
     }
 

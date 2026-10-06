@@ -101,12 +101,19 @@ pub struct WalkEntry {
 
 /// An open XFS filesystem.
 ///
-/// Reading only, for now. Nothing here replays the log, so
-/// [`Volume::open`] opens only a filesystem that was cleanly unmounted.
+/// Nothing here replays the log, so [`Volume::open`] opens only a
+/// filesystem that was cleanly unmounted. Writing — [`Volume::write`],
+/// [`Volume::mkdir`] and the rest — needs a device that can be written
+/// ([`crate::FileDevice::open_rw`], [`crate::MemDevice`]) and a call to
+/// [`Volume::flush`] before the volume is dropped.
 pub struct Volume<D: BlockDevice> {
-    dev: D,
-    sb: Superblock,
-    log: LogState,
+    pub(crate) dev: D,
+    pub(crate) sb: Superblock,
+    pub(crate) log: LogState,
+    /// What the write side holds in memory; created by the first write.
+    pub(crate) w: Option<Box<crate::write::Writer>>,
+    /// The time stamped on what is written, when fixed by `set_time`.
+    pub(crate) time: Option<Timestamp>,
 }
 
 impl<D: BlockDevice> Volume<D> {
@@ -157,7 +164,7 @@ impl<D: BlockDevice> Volume<D> {
             Err(Error::Corrupt(why)) => LogState::Unreadable(why),
             Err(e) => return Err(e),
         };
-        Ok(Volume { dev: device, sb, log })
+        Ok(Volume { dev: device, sb, log, w: None, time: None })
     }
 
     /// How the log was found when the filesystem was opened.
@@ -182,7 +189,7 @@ impl<D: BlockDevice> Volume<D> {
 
     // ---- blocks and inodes ------------------------------------------------
 
-    async fn read_blocks(&self, fsb: u64, count: u64) -> Result<Vec<u8>> {
+    pub(crate) async fn read_blocks(&self, fsb: u64, count: u64) -> Result<Vec<u8>> {
         let at = self.sb.fsb_to_byte(fsb)?;
         let len = count << self.sb.block_log;
         // The run must stay inside one AG, which is what makes it contiguous.
@@ -205,25 +212,32 @@ impl<D: BlockDevice> Volume<D> {
 
     /// The extents of an inode's data fork, or its attribute fork.
     pub async fn extents(&self, inode: &Inode, attr: bool) -> Result<Vec<Extent>> {
+        Ok(self.fork_map(inode, attr).await?.0)
+    }
+
+    /// A fork's extents, and the blocks of its bmap B+tree when it has one.
+    pub(crate) async fn fork_map(&self, inode: &Inode, attr: bool) -> Result<(Vec<Extent>, Vec<u64>)> {
         let (format, fork, count) = if attr {
             match inode.aformat {
-                None => return Ok(Vec::new()),
+                None => return Ok((Vec::new(), Vec::new())),
                 Some(f) => (f, &inode.attr_fork, inode.anextents as u64),
             }
         } else {
             (inode.format, &inode.data_fork, inode.nextents)
         };
         match format {
-            Format::Extents => bmap::finish(bmap::inline_extents(fork, count)?),
+            Format::Extents => Ok((bmap::finish(bmap::inline_extents(fork, count)?)?, Vec::new())),
             Format::Btree => {
                 let (level, ptrs) = bmap::btree_root(fork)?;
                 let mut out = Vec::new();
                 let mut seen = HashSet::new();
+                let mut blocks = Vec::new();
                 let mut stack: Vec<(u64, u16)> = ptrs.into_iter().rev().map(|p| (p, level - 1)).collect();
                 while let Some((fsb, want)) = stack.pop() {
                     if !seen.insert(fsb) || seen.len() as u64 > inode.nblocks + 1 {
                         return Err(corrupt(format!("inode {}: bmap B+tree loops", inode.ino)));
                     }
+                    blocks.push(fsb);
                     let buf = self.read_blocks(fsb, 1).await?;
                     let (lvl, n) = bmap::check_btree_block(&self.sb, &buf, fsb, inode.ino)?;
                     if lvl != want {
@@ -246,9 +260,9 @@ impl<D: BlockDevice> Volume<D> {
                         inode.nextents
                     )));
                 }
-                bmap::finish(out)
+                Ok((bmap::finish(out)?, blocks))
             }
-            Format::Local | Format::Dev => Ok(Vec::new()),
+            Format::Local | Format::Dev => Ok((Vec::new(), Vec::new())),
         }
     }
 
@@ -314,6 +328,10 @@ impl<D: BlockDevice> Volume<D> {
     pub(crate) async fn dir_entries(&self, inode: &Inode) -> Result<Vec<RawEntry>> {
         if !inode.is_dir() {
             return Err(Error::NotADirectory(format!("inode {}", inode.ino)));
+        }
+        // A directory changed since the last flush is in memory, not on disk.
+        if let Some(names) = self.w.as_ref().and_then(|w| w.cached_entries(inode.ino)) {
+            return Ok(names);
         }
         if inode.format == Format::Local {
             let (parent, mut names) = dir::parse_shortform(&self.sb, &inode.data_fork, inode.size)?;

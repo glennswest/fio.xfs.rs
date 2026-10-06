@@ -203,6 +203,11 @@ pub struct Ag {
     agi: Vec<u8>,
     /// Free extents: start → length.
     pub free: BTreeMap<u32, u32>,
+    /// Blocks in `free`.
+    free_total: u64,
+    /// Free blocks ordinary allocations leave alone, so the trees can be
+    /// rebuilt at flush.
+    reserve: u64,
     /// The AGFL's blocks, which are neither free here nor in a tree.
     agfl: Vec<u32>,
     /// Every block of the trees as they were read: free when rebuilt.
@@ -390,14 +395,21 @@ impl Ag {
             }
         }
 
-        Ok(Ag { agno, len, agf, agi, free, agfl, old_tree_blocks, chunks, rmap, dirty: false })
+        let free_total = free.values().map(|&n| n as u64).sum();
+        let reserve = (old_tree_blocks.len() as u64 * 2 + 32).min(len as u64 / 8);
+        Ok(Ag { agno, len, agf, agi, free, free_total, reserve, agfl, old_tree_blocks, chunks, rmap, dirty: false })
     }
 
     // ---- free space --------------------------------------------------------
 
     /// Free blocks in this AG.
     pub fn free_blocks(&self) -> u64 {
-        self.free.values().map(|&n| n as u64).sum()
+        self.free_total
+    }
+
+    /// Blocks an ordinary allocation may still take.
+    fn spare(&self) -> u64 {
+        self.free_total.saturating_sub(self.reserve)
     }
 
     /// Take `start..start+len` out of the free extent that holds it.
@@ -405,6 +417,7 @@ impl Ag {
         let (&fs, &fl) = self.free.range(..=start).next_back().expect("taking a block that is not free");
         assert!(fs + fl >= start + len, "taking blocks that are not free");
         self.free.remove(&fs);
+        self.free_total -= len as u64;
         if fs < start {
             self.free.insert(fs, start - fs);
         }
@@ -417,7 +430,10 @@ impl Ag {
     /// Up to `want` contiguous blocks, at or after `near` when possible:
     /// the first free extent long enough, else the longest there is.
     pub fn alloc(&mut self, want: u32, near: u32) -> Option<(u32, u32)> {
-        let want = want.min(MAX_EXTENT);
+        let want = want.min(MAX_EXTENT).min(self.spare().min(u32::MAX as u64) as u32);
+        if want == 0 {
+            return None;
+        }
         let pick = self
             .free
             .range(near..)
@@ -431,6 +447,9 @@ impl Ag {
 
     /// One free block that is not `not`.
     pub fn alloc_block_except(&mut self, not: u32) -> Option<u32> {
+        if self.spare() == 0 {
+            return None;
+        }
         let b = self.free.iter().find_map(|(&s, &n)| {
             if s != not {
                 Some(s)
@@ -446,6 +465,9 @@ impl Ag {
 
     /// `len` contiguous blocks starting at a multiple of `align`.
     pub fn alloc_aligned(&mut self, len: u32, align: u32) -> Option<u32> {
+        if self.spare() < len as u64 {
+            return None;
+        }
         let start = self.free.iter().find_map(|(&s, &n)| {
             let a = s.div_ceil(align) * align;
             (a as u64 + len as u64 <= s as u64 + n as u64).then_some(a)
@@ -482,6 +504,7 @@ impl Ag {
             }
         }
         self.free.insert(s, n);
+        self.free_total += len as u64;
         self.dirty = true;
         Ok(())
     }
@@ -625,6 +648,7 @@ impl Ag {
         };
 
         let base_free = self.free.clone();
+        let base_total = self.free_total;
         let base_rmap = self.rmap.clone();
         let mut ag_blocks = ag_need(self.free.len(), self.merged_rmap().len() + 2);
         let mut tries = 0;
@@ -634,6 +658,7 @@ impl Ag {
                 return Err(corrupt(format!("AG {}: B+tree sizes do not settle", self.agno)));
             }
             self.free = base_free.clone();
+            self.free_total = base_total;
             self.rmap = base_rmap.clone();
             let ino_run = self.carve(ino_blocks as u32)?;
             let ag_run = self.carve(ag_blocks as u32)?;
@@ -750,6 +775,7 @@ impl Ag {
         // Everything is in the new trees now; another flush frees them and
         // works out the AG- and inobt-owned mappings again.
         self.old_tree_blocks = ag_list.into_iter().chain(ino_list).collect();
+        self.reserve = (self.old_tree_blocks.len() as u64 * 2 + 32).min(self.len as u64 / 8);
         self.dirty = false;
         Ok(writes)
     }

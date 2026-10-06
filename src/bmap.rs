@@ -32,6 +32,16 @@ impl Extent {
         }
     }
 
+    /// Pack into a 128-bit extent record.
+    pub fn encode(&self) -> [u8; 16] {
+        let l0 = (self.unwritten as u64) << 63 | (self.offset & ((1 << 54) - 1)) << 9 | self.block >> 43;
+        let l1 = (self.block & ((1 << 43) - 1)) << 21 | (self.count & ((1 << 21) - 1));
+        let mut rec = [0u8; 16];
+        rec[..8].copy_from_slice(&l0.to_be_bytes());
+        rec[8..].copy_from_slice(&l1.to_be_bytes());
+        rec
+    }
+
     /// One past the last logical block.
     pub fn end(&self) -> u64 {
         self.offset + self.count
@@ -153,6 +163,7 @@ mod tests {
         rec[8..].copy_from_slice(&l1.to_be_bytes());
         let e = Extent::decode(&rec);
         assert_eq!(e, Extent { offset: off, block: blk, count: cnt, unwritten: true });
+        assert_eq!(e.encode(), rec);
     }
 
     #[test]

@@ -50,11 +50,14 @@
 #![forbid(unsafe_code)]
 
 mod bytes;
+mod alloc;
 pub mod attr;
 pub mod bmap;
+mod btree;
 pub mod crc;
 pub mod device;
 pub mod dir;
+mod dirwrite;
 pub mod error;
 pub mod export;
 pub mod inode;
@@ -62,6 +65,7 @@ pub mod log;
 pub mod sb;
 pub mod tar;
 pub mod volume;
+pub mod write;
 
 pub use attr::Xattr;
 pub use device::{BlockDevice, FileDevice, MemDevice};
@@ -72,3 +76,4 @@ pub use inode::{Inode, Timestamp};
 pub use log::LogState;
 pub use sb::Superblock;
 pub use volume::{Entry, Stat, Volume, WalkEntry};
+pub use write::{Attrs, Special};
