@@ -4,7 +4,7 @@ Userspace file I/O into XFS. Follow fio.ext4.rs's structure and rules (read
 its CLAUDE.md).
 
 - **Crate:** `fio-xfs` (lib `fio_xfs`), binary `fio-xfs`
-- **Version:** 0.2.0 — `Cargo.toml` and `VERSION` must match
+- **Version:** 0.3.0 — `Cargo.toml` and `VERSION` must match
 - **Ships:** as a library by git tag (plus the `fio-xfs` CLI behind the
   default `cli` feature); no service, config or ports, and no golden —
   stormcentral does not list it as a component
@@ -30,15 +30,12 @@ its CLAUDE.md).
       O(size) per path component in a huge directory
 - [ ] Issue #4 — share mkfs-xfs's on-disk layer (format constants, CRC,
       device trait) rather than a second copy
-- [ ] Issue #6 (P2) — detect a dirty log — IN PROGRESS (2026-10-06):
-      `log` module ports the kernel's `xlog_find_head`/`xlog_find_tail`
-      (cycle binary search, verify windows, back up to a record header,
-      unmount-record check); `Volume::open` refuses `Error::DirtyLog`,
-      `Volume::open_norecovery` reads as-is, `Volume::log_state()`; CLI
-      `info` shows it, `--norecovery` flag. Tests: mkfs images are clean
-      (cross-checked with `xfs_logprint -t`), a broken unmount record is
-      dirty, the kernel test crashes a mount (no unmount) → dirty.
-      Breaking (open refuses more) → v0.3.0.
+- [x] Issue #6 — dirty log detected (2026-10-06, v0.3.0): `log` module
+      ports the kernel's head/tail search; `Volume::open` refuses
+      `Error::DirtyLog`, `open_norecovery` reads as-is, `log_state()`.
+      Verified on dev: unit tests on hand-made logs, every mkfs image clean
+      (xfs_logprint agrees), a kernel crash refused with xfs_logprint's head
+      and tail, clean after the kernel replays it. stormblock#198 consumes it.
 - [ ] Issue #7 (P3) — realtime-device files: `read_inode_range` returns
       `Unsupported` for `XFS_DIFLAG_REALTIME` inodes
 - [ ] Issue #5 (P3) — write: create files and directories, allocate extents,
@@ -50,14 +47,10 @@ its CLAUDE.md).
       media through that API. XFS for the registry's own PVC blank ladder
       (`pvc-ext4j-*`) is stormcos#91's decision, not work in this crate.
 
-## Where things stand (2026-09-28)
+## Where things stand (2026-10-06)
 
-Docs refreshed from the code a fourth time: no code has changed since v0.2.0
-(2026-09-25). Every README claim was checked against the code (open
-refusals, 40 symlink hops, 4 KiB holes, CLI) and against stormblock, which
-pins `tag = "v0.2.0"` and refuses XFS `seed` until #5. README now lists the
-by-inode API. No docs promise is unkept, so no new issues. Open: #6 (P2),
-#4, #5, #7, #8. No work in progress.
+v0.3.0: dirty-log detection (#6) done and tagged. Open: #4, #5, #7, #8.
+No work in progress.
 
 ## Things learned the hard way (issue #1)
 
@@ -72,6 +65,12 @@ by-inode API. No docs promise is unkept, so no new issues. Open: #6 (P2),
   symlinks to one block; the kernel test covers two.
 - **On an SELinux host `mkfs.xfs -p` copies each source file's label**, so
   protofile images carry `security.selinux` nobody asked for.
+- **The log (#6):** every 512-byte basic block starts with its cycle
+  number (a record header keeps it after its `0xFEEDBABE` magic); the head
+  is where the cycle drops, and the log is clean when the record just
+  before the head is an unmount record (one op, flag `0x20`). `xfs_logprint
+  -f` means "this file *is* the log": run `xfs_logprint -t IMAGE` instead.
+  A crash in the kernel test is `sync()` then power off without umount.
 - **Kernel tests without root:** dev's `/dev/kvm` is world-writable and the
   kernel and modules are readable, so `tests/kernel.rs` boots
   `/boot/vmlinuz-$(uname -r)` (or `/lib/modules/$(uname -r)/vmlinuz`) with an initramfs whose `/init` is the
