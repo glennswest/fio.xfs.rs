@@ -1,6 +1,6 @@
 //! Errors.
 
-/// Anything that can go wrong reading a filesystem.
+/// Anything that can go wrong reading or writing a filesystem.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The device, or a stream being written to, failed.
@@ -53,6 +53,18 @@ pub enum Error {
     /// The path was malformed.
     #[error("invalid path: {0}")]
     InvalidPath(String),
+
+    /// Something is already there.
+    #[error("already exists: {0}")]
+    Exists(String),
+
+    /// The directory is not empty.
+    #[error("directory not empty: {0}")]
+    NotEmpty(String),
+
+    /// The filesystem has no room left: no free blocks, or no inodes.
+    #[error("no space left: {0}")]
+    NoSpace(String),
 }
 
 /// Result alias.
