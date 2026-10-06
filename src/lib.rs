@@ -1,8 +1,9 @@
 //! Async userspace file I/O into **XFS**.
 //!
-//! Read the files inside an XFS filesystem image or volume with no kernel,
-//! no mount and no loop device — so it works unprivileged, in a container,
-//! on a Mac, and against storage that is not a block device at all.
+//! Read and write the files inside an XFS filesystem image or volume with
+//! no kernel, no mount and no loop device — so it works unprivileged, in a
+//! container, on a Mac, and against storage that is not a block device at
+//! all.
 //!
 //! ```no_run
 //! use fio_xfs::{FileDevice, Volume};
@@ -36,6 +37,26 @@
 //! cleanly unmounted ([`Error::DirtyLog`]): what is on disk may be stale.
 //! [`Volume::open_norecovery`] reads one anyway, as it stands on disk, and
 //! [`Volume::log_state`] says how the log was found.
+//!
+//! # Writing
+//!
+//! Version 5 filesystems can be written: [`Volume::write`],
+//! [`Volume::mkdir_all`], [`Volume::symlink`], [`Volume::mknod`],
+//! [`Volume::link`], [`Volume::unlink`], [`Volume::rmdir`],
+//! [`Volume::chmod`], [`Volume::chown`] — then [`Volume::flush`], before
+//! which nothing on disk is consistent. See [`write`] for how.
+//!
+//! ```no_run
+//! use fio_xfs::{FileDevice, Volume};
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut vol = Volume::open(FileDevice::open_rw("template.img").await?).await?;
+//! vol.mkdir_all("/etc/stormblock").await?;
+//! vol.write("/etc/stormblock/boot.toml", b"[boot]\n").await?;
+//! vol.flush().await?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # Getting a tree out
 //!

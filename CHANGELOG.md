@@ -3,6 +3,13 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-06
+- **feat:** Write v5 filesystems (#5): `Volume::write`/`write_with`, `mkdir`/`mkdir_with`, `mkdir_all`/`mkdir_all_with`, `symlink`, `mknod`, `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `Attrs`, `Special`. Free space, inode chunks, free-inode records, reverse mappings and bmap B+trees are kept in memory and the AG B+trees rebuilt at `flush`; directories are laid out at `flush` in short form, block, leaf or node form
+- **feat:** `BlockDevice::write_at` and `flush` (provided; a device that does not implement them is read-only), `FileDevice::open_rw`, `MemDevice` writable
+- **feat:** `Superblock` gains `meta_uuid`, `inode_align`, `spino_align`, `imax_pct`, `features_log_incompat`, feature helpers and AG/inode number conversions; `FileType::code`/`from_ftype`; `Extent::encode`; `crc::stamp`
+- **BREAKING:** `Error` gains `Exists`, `NotEmpty`, `NoSpace`
+- **test:** `tests/write.rs` (xfs_repair -n on everything written, across geometries and feature sets); the kernel test mounts images written here, reads them and changes them
+
 ### 2026-09-28
 - **docs:** Fourth refresh from the code (no code changes since v0.2.0; README, crate docs and CLAUDE.md rechecked against the code and against stormblock's use of v0.2.0): README lists the by-inode API (`inode`, `read_inode_range`, `walk_each`, …) and `pack_tar`, `exists`, `get_xattr`, `read_link_bytes`; no docs promise found that the code does not keep, so no new issues
 

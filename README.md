@@ -1,7 +1,7 @@
 # fio-xfs
 
-Async **userspace file I/O into XFS** — read files with no kernel, no mount
-and no loop device; the XFS sibling of
+Async **userspace file I/O into XFS** — read and write files with no
+kernel, no mount and no loop device; the XFS sibling of
 [fio.ext4.rs](https://github.com/glennswest/fio.ext4.rs).
 
 Why: images whose root is XFS (RHEL, Rocky, Alma cloud images) are imported
@@ -9,12 +9,13 @@ and verified the same way as ext4 ones. stormblock's engine import
 (`POST /api/v1/volumes/import`, stormblock#147) finds, opens and walks XFS
 filesystems — whole volumes and GPT partitions — with this crate, and
 stormblock-registry imports media through that engine API. stormblock also
-reads the XFS blanks it formats with `mkfs-xfs` through it.
+reads the XFS blanks it formats with `mkfs-xfs` through it, and seeds files
+into XFS templates with the write side (#5).
 
 ## Status
 
-v0.3.0 reads (#1), and refuses a filesystem with a dirty log (#6). It does not write: seeding files into an XFS volume is
-issue #5, and until then stormblock refuses `seed` on XFS templates.
+Reads (#1), refuses a filesystem with a dirty log (#6), and writes v5
+filesystems (#5).
 
 | Reads | |
 |---|---|
@@ -26,6 +27,13 @@ issue #5, and until then stormblock refuses `seed` on XFS templates.
 | The log | checked, not replayed: `Volume::open` finds the log's head and tail as the kernel does before a mount, and opens only a filesystem whose last log record is an unmount record (#6). A log on its own device cannot be seen, so it is not checked (`LogState::External`) |
 | Not read | files on a realtime device — `walk` lists them, reading one is `Error::Unsupported` (#7) |
 | Refused at open | a dirty log — not cleanly unmounted, so changes may be in the log and not on disk (`Error::DirtyLog`; mount it once to replay it, or read it as it stands with `open_norecovery`); a log that cannot be made sense of (`Error::Corrupt`); v4 without v2 directories; v5 with unknown incompatible features or `NEEDSREPAIR` set; any superblock that fails its checksum |
+
+| Writes | |
+|---|---|
+| Filesystems | v5 (CRC) only — what `mkfs.xfs` has made by default since 2015 and all `mkfs-xfs` makes — with finobt, rmapbt, reflink, inobtcount, bigtime, 64-bit extent counts and sparse inodes, each on or off. Refused (`Error::Unsupported`): v4, case-insensitive names, parent pointers, metadir, zoned, a log that is not clean |
+| Operations | `write` (create or replace a whole file), `mkdir`, `mkdir_all`, `symlink`, `mknod` (devices, FIFOs, sockets), `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `*_with` variants take `Attrs` (mode, uid, gid) |
+| Kept true | free space (by block and by length), inode chunks and free-inode records, reverse mappings, bmap B+trees for files with more extents than their inode holds, every directory form, every checksum, AGF/AGI/superblock counters — `xfs_repair -n` finds nothing, and the kernel mounts, reads and goes on writing the result |
+| Not yet | extended attributes, rename, writing into the middle of a file, realtime files; rewriting or removing a file whose extents are shared (reflinked) is refused |
 
 ## Library
 
@@ -69,6 +77,31 @@ println!("{}", vol.log_state()); // clean | dirty (head H, tail T) | external | 
 
 Nothing here replays the log; the kernel does, on the next mount.
 
+Writing needs a device that can be written (`FileDevice::open_rw`,
+`MemDevice`, or any `BlockDevice` that implements `write_at`) and a
+`flush` at the end:
+
+```rust
+use fio_xfs::{Attrs, FileDevice, Special, Volume};
+
+let mut vol = Volume::open(FileDevice::open_rw("template.img").await?).await?;
+vol.set_time(1_700_000_000); // reproducible images; otherwise "now"
+vol.mkdir_all("/etc/stormblock").await?;
+vol.write("/etc/stormblock/boot.toml", b"...").await?;
+vol.write_with("/etc/shadow", b"...", &Attrs::mode(0o600)).await?;
+vol.symlink("/bin", "usr/bin").await?;
+vol.mknod("/dev/console", Special::CharDevice { major: 5, minor: 1 }, &Attrs::mode(0o600)).await?;
+vol.flush().await?; // nothing is consistent on disk until this
+```
+
+File contents and inodes go to the device as they are written; directories
+are kept as lists of names and laid out at `flush` in whichever form holds
+them (short form, block, leaf, node), and each AG touched has its free-space,
+inode and reverse-mapping B+trees rebuilt from memory at `flush`, then its
+AGF and AGI and the superblock counters. Reads between writes see the
+writes. The log is not written: the filesystem must be cleanly unmounted to
+start with, and it stays so.
+
 Lookups resolve symlinks in the middle of a path (absolute targets from the
 image's root, at most 40 hops); `stat`, `lookup`, `read_link` and
 `list_xattrs` do not follow a final symlink, `read`, `read_range` and
@@ -85,7 +118,8 @@ hands each name and its inode to a closure instead of collecting them;
 `read_link_bytes` (a target that is not UTF-8) round out the path calls.
 
 Anything that implements `fio_xfs::BlockDevice` (`size` and `read_at`) can
-be read; `FileDevice` and `MemDevice` are provided.
+be read, and written when it also implements `write_at` (and `flush`);
+`FileDevice` (`open` read-only, `open_rw`) and `MemDevice` are provided.
 
 ## How it ships
 
@@ -93,7 +127,7 @@ A library crate with a CLI, not a service: no configuration, no ports.
 Consumers depend on it by git tag, as they do on fio-ext4:
 
 ```toml
-fio-xfs = { git = "https://github.com/glennswest/fio.xfs.rs", tag = "v0.3.0", default-features = false }
+fio-xfs = { git = "https://github.com/glennswest/fio.xfs.rs", tag = "v0.4.0", default-features = false }
 ```
 
 The default `cli` feature builds the `fio-xfs` binary (clap, anyhow, the
@@ -122,8 +156,8 @@ fio-xfs IMAGE tar [-o FILE] [--root PATH]
 
 ## Tests
 
-`cargo test` runs the unit tests everywhere, and two integration tests that
-need real tools and say so and pass when they are missing:
+`cargo test` runs the unit tests everywhere, and three integration tests
+that need real tools and say so and pass when they are missing:
 
 - `tests/mkfs_images.rs` — images made by `mkfs.xfs -p` (a protofile) with
   attributes set by `xfs_db`, checked with `xfs_repair -n`, then read back:
@@ -144,6 +178,18 @@ need real tools and say so and pass when they are missing:
   without unmounting; the image is refused as dirty with the log head and
   tail `xfs_logprint` reports, and after a second boot replays the log and
   unmounts, it opens clean with every file written before the crash.
+  Last, the kernel mounts images this crate wrote (4 KiB blocks, and 1 KiB
+  blocks with 8 KiB directory blocks), reads every file, adds and removes
+  names in every directory form and writes a file of its own; `xfs_repair
+  -n` passes before and after, and the kernel's changes read back here.
+- `tests/write.rs` — filesystems made by `mkfs.xfs`, written by this crate
+  and checked by `xfs_repair -n`, then read back: files of every size,
+  owners and modes, every directory form, inline and remote symlinks,
+  devices, hard links, replaced and removed files, a fragmented file under
+  a bmap B+tree, a filesystem written until it is full; on the default
+  geometry, 1 KiB blocks with 8 KiB directory blocks, 2 KiB inodes, 16 AGs
+  and with finobt, rmapbt, reflink, bigtime, inobtcount, nrext64 and sparse
+  inodes all off; into an image xfsprogs populated; through `MemDevice`.
 
 They run on the build box through `sc-build`.
 
