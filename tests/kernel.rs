@@ -17,6 +17,12 @@
 //! kernel replays the log) and unmounts cleanly, and then it opens and
 //! everything written before the crash is there.
 //!
+//! Last, the other way round: this crate writes an image (every directory
+//! form, a big file, a symlink), the kernel mounts it, reads every file back,
+//! then adds and removes names in each directory and writes a file of its
+//! own — growing the B+trees this crate built — and unmounts. `xfs_repair -n`
+//! passes after each side, and the kernel's changes read back here.
+//!
 //! Needs `/dev/kvm`, `qemu-system-x86_64`, `mkfs.xfs` and a readable kernel
 //! and modules for the running kernel; without them it says what is missing
 //! and passes. No root: the VM is root inside, the host side never is.
@@ -34,6 +40,27 @@ const DONE: &str = "FIO-XFS-POPULATED";
 /// On the kernel command line: what the guest does instead of populating.
 const CRASH: &str = "fioxfs.crash";
 const REMOUNT: &str = "fioxfs.remount";
+const WRITTEN: &str = "fioxfs.written";
+
+/// What this crate writes for the kernel to read, under `w/`: paths and
+/// contents. Directories are made as needed.
+fn written_files() -> Vec<(String, Vec<u8>)> {
+    let mut v = vec![
+        ("w/hello".to_string(), b"hello from fio-xfs\n".to_vec()),
+        ("w/big".to_string(), bytes(11, (3 << 20) + 5)),
+    ];
+    for (dir, n) in WRITTEN_DIRS {
+        for i in 0..n {
+            v.push((format!("w/{dir}/name-{i:05}"), piece(i)));
+        }
+    }
+    v
+}
+
+/// Directories of every form, and how many names each starts with.
+const WRITTEN_DIRS: [(&str, usize); 4] = [("sf", 3), ("block", 40), ("leaf", 400), ("node", 3000)];
+/// Names the kernel adds to each; it removes every seventh of ours.
+const KERNEL_ADDS: usize = 60;
 
 /// Files the crash run writes, under `crash/`.
 const CRASH_FILES: usize = 200;
@@ -334,6 +361,13 @@ mod guest {
             println!("{DONE}");
             power_off();
         }
+        if cmdline.split_whitespace().any(|w| w == WRITTEN) {
+            mount("/dev/vda", "/mnt", "xfs", "");
+            check_written();
+            check("umount", unsafe { libc::umount(m.as_ptr()) });
+            println!("{DONE}");
+            power_off();
+        }
         if cmdline.split_whitespace().any(|w| w == REMOUNT) {
             // Mounting replays the log; unmounting leaves it clean.
             mount("/dev/vda", "/mnt", "xfs", "");
@@ -348,6 +382,46 @@ mod guest {
         check("umount", unsafe { libc::umount(m.as_ptr()) });
         println!("{DONE}");
         power_off();
+    }
+
+    fn fail(what: String) -> ! {
+        println!("FIO-XFS-FAILED {what}");
+        power_off();
+    }
+
+    /// Read what this crate wrote, then change it.
+    fn check_written() {
+        let mnt = Path::new("/mnt");
+        for (p, data) in written_files() {
+            match std::fs::read(mnt.join(&p)) {
+                Ok(d) if d == data => {}
+                Ok(d) => fail(format!("{p}: {} bytes read back differ from {} written", d.len(), data.len())),
+                Err(e) => fail(format!("reading {p}: {e}")),
+            }
+        }
+        match std::fs::read_link(mnt.join("w/link")) {
+            Ok(t) if t == Path::new("sf/name-00001") => {}
+            other => fail(format!("w/link: {other:?}")),
+        }
+        for (dir, n) in WRITTEN_DIRS {
+            let count = std::fs::read_dir(mnt.join("w").join(dir)).map(|d| d.count()).unwrap_or(usize::MAX);
+            if count != n {
+                fail(format!("w/{dir} lists {count} names, {n} were written"));
+            }
+            for i in 0..KERNEL_ADDS {
+                if let Err(e) = std::fs::write(mnt.join(format!("w/{dir}/kernel-{i:03}")), piece(i + 7)) {
+                    fail(format!("w/{dir}/kernel-{i:03}: {e}"));
+                }
+            }
+            for i in (0..n).step_by(7) {
+                if let Err(e) = std::fs::remove_file(mnt.join(format!("w/{dir}/name-{i:05}"))) {
+                    fail(format!("removing w/{dir}/name-{i:05}: {e}"));
+                }
+            }
+        }
+        if let Err(e) = std::fs::write(mnt.join("w/kernel-big"), bytes(12, 2 << 20)) {
+            fail(format!("w/kernel-big: {e}"));
+        }
     }
 
     fn populate(root: &Path) {
@@ -647,7 +721,8 @@ fn main() {
     }
 
     crash(&kernel, &initrd, dir.path());
-    println!("test result: ok. kernel-populated images verified, a crashed one refused");
+    written(&kernel, &initrd, dir.path());
+    println!("test result: ok. kernel-populated images verified, a crashed one refused, a written one mounted");
 }
 
 fn boot_ok(kernel: &Path, initrd: &Path, image: &Path, mode: &str) {
@@ -710,6 +785,55 @@ fn crash(kernel: &Path, initrd: &Path, dir: &Path) {
         assert!(clean, "xfs_logprint says the replayed log is dirty");
     }
     println!("crashed: after the kernel replayed the log, clean and every file read back");
+}
+
+fn repair_clean(image: &Path, when: &str) {
+    if Command::new("xfs_repair").arg("-V").output().is_ok() {
+        let o = Command::new("xfs_repair").args(["-n", "-f"]).arg(image).output().unwrap();
+        assert!(o.status.success(), "xfs_repair -n {when}: {}", String::from_utf8_lossy(&o.stdout));
+    }
+}
+
+/// An image written by this crate, mounted, read and changed by the kernel.
+fn written(kernel: &Path, initrd: &Path, dir: &Path) {
+    use fio_xfs::{FileDevice, Volume};
+    for (label, opts) in [("written", &[][..]), ("written-1k", &["-b", "size=1024", "-n", "size=8192"][..])] {
+        let image = dir.join(format!("{label}.xfs"));
+        std::fs::File::create(&image).unwrap().set_len(1 << 30).unwrap();
+        let o = Command::new("mkfs.xfs").args(["-q", "-f"]).args(opts).arg(&image).output().unwrap();
+        assert!(o.status.success(), "mkfs.xfs: {}", String::from_utf8_lossy(&o.stderr));
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut vol = Volume::open(FileDevice::open_rw(&image).await.unwrap()).await.unwrap();
+            for (p, data) in written_files() {
+                let parent = &p[..p.rfind('/').unwrap()];
+                vol.mkdir_all(&format!("/{parent}")).await.unwrap();
+                vol.write(&format!("/{p}"), &data).await.unwrap();
+            }
+            vol.symlink("/w/link", "sf/name-00001").await.unwrap();
+            vol.flush().await.unwrap();
+        });
+        repair_clean(&image, &format!("{label}: as fio-xfs wrote it"));
+
+        boot_ok(kernel, initrd, &image, WRITTEN);
+        println!("{label}: the kernel mounted it and read every file back");
+        repair_clean(&image, &format!("{label}: after the kernel changed it"));
+
+        rt.block_on(async {
+            let vol = Volume::open(FileDevice::open(&image).await.unwrap()).await.unwrap();
+            for (dir, n) in WRITTEN_DIRS {
+                let names = vol.read_dir(&format!("/w/{dir}")).await.unwrap().len();
+                assert_eq!(names, n - n.div_ceil(7) + KERNEL_ADDS, "w/{dir}");
+                for i in 0..KERNEL_ADDS {
+                    let got = vol.read(&format!("/w/{dir}/kernel-{i:03}")).await.unwrap();
+                    assert!(got == piece(i + 7), "w/{dir}/kernel-{i:03}");
+                }
+                assert!(!vol.exists(&format!("/w/{dir}/name-00000")).await.unwrap());
+            }
+            assert!(vol.read("/w/kernel-big").await.unwrap() == bytes(12, 2 << 20), "w/kernel-big");
+        });
+        println!("{label}: xfs_repair agrees before and after, and the kernel's changes read back");
+    }
 }
 
 async fn verify(image: &Path) {

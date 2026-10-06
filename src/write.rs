@@ -475,9 +475,19 @@ impl<D: BlockDevice> Volume<D> {
             extents.push(Extent { offset: lblk, block: fsb, count: len as u64, unwritten: false });
             lblk += len as u64;
         }
-        self.write_mapped(&extents, data).await?;
-        let (format, fork, btree_blocks) = self.map_fork(ino, &extents, fork_size).await?;
-        Ok((format, fork, n + btree_blocks, extents.len() as u64))
+        let mapped = match self.write_mapped(&extents, data).await {
+            Ok(()) => self.map_fork(ino, &extents, fork_size).await,
+            Err(e) => Err(e),
+        };
+        match mapped {
+            Ok((format, fork, btree_blocks)) => Ok((format, fork, n + btree_blocks, extents.len() as u64)),
+            Err(e) => {
+                for x in &extents {
+                    self.release(x.block, x.count as u32, ino).await?;
+                }
+                Err(e)
+            }
+        }
     }
 
     // ---- inodes --------------------------------------------------------------
@@ -576,6 +586,12 @@ impl<D: BlockDevice> Volume<D> {
             }
         }
         Err(Error::NoSpace("no room for more inodes".into()))
+    }
+
+    /// Give back an inode allocated but never written.
+    fn unalloc_ino(&mut self, ino: u64) -> Result<()> {
+        let (agno, agino) = self.sb.ino_to_agino(ino);
+        self.ag_mut(agno).1.free_inode(agino)
     }
 
     /// Free an inode and everything it holds.
@@ -761,9 +777,10 @@ impl<D: BlockDevice> Volume<D> {
                 if inode.is_realtime() {
                     return Err(Error::Unsupported(format!("{path}: data on the realtime device")));
                 }
-                let freed = self.free_fork(&inode, false).await?;
                 let mut raw = self.read_raw(ino).await?;
+                // The new contents first: if there is no room, the old stay.
                 let (format, fork, used, nextents) = self.store_data(ino, raw.data_fork_size(), data).await?;
+                let freed = self.free_fork(&inode, false).await?;
                 raw.set_data_fork(format, &fork);
                 raw.set_size(data.len() as u64);
                 raw.set_nextents(nextents);
@@ -782,7 +799,13 @@ impl<D: BlockDevice> Volume<D> {
             None => {
                 let a = attrs.copied().unwrap_or_default();
                 let (dino, name, ino, mut raw) = self.create_node(path, mode::IFREG | a.perms(), a.uid, a.gid, 1).await?;
-                let (format, fork, used, nextents) = self.store_data(ino, raw.data_fork_size(), data).await?;
+                let (format, fork, used, nextents) = match self.store_data(ino, raw.data_fork_size(), data).await {
+                    Ok(stored) => stored,
+                    Err(e) => {
+                        self.unalloc_ino(ino)?;
+                        return Err(e);
+                    }
+                };
                 raw.set_data_fork(format, &fork);
                 raw.set_size(data.len() as u64);
                 raw.set_nextents(nextents);
@@ -879,6 +902,10 @@ impl<D: BlockDevice> Volume<D> {
                         continue 'blocks;
                     }
                 }
+                for e in &extents {
+                    self.release(e.block, 1, ino).await?;
+                }
+                self.unalloc_ino(ino)?;
                 return Err(Error::NoSpace(path.into()));
             }
             for (i, e) in extents.iter().enumerate() {
