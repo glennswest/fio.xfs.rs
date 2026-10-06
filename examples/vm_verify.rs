@@ -87,7 +87,10 @@ async fn write(image: &str) -> Result<Manifest, Error> {
         ("odd", bytes(3, 5000)),
     ] {
         vol.write(&format!("/t/{name}"), &data).await?;
-        m.file(&format!("t/{name}"), &data, 0o644, 0, 0, 1);
+        // `hello` gets a second name below, and its line with it.
+        if name != "hello" {
+            m.file(&format!("t/{name}"), &data, 0o644, 0, 0, 1);
+        }
     }
     vol.write_with("/t/setuid", b"#!/bin/sh\n", &Attrs::mode(0o4755).owner(1000, 100)).await?;
     m.file("t/setuid", b"#!/bin/sh\n", 0o4755, 1000, 100, 1);
