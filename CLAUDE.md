@@ -59,17 +59,12 @@ its CLAUDE.md).
       - Not in this round: xattrs, rename, append/write_at, reflinked files.
       - Verified by `xfs_repair -n` on every image written, by reading back,
         and by the kernel test mounting a written image.
-- [ ] Issue #12 (P2) — kernel verification in a throwaway VM (IN PROGRESS,
-      2026-10-06): `stormcentral testhost boot nanatest1` (fio.xfs.rs is in its
-      project list). Recipe from mkfs.xfs.rs#11 (`tests/vm/`): sc-build runs
-      `tests/vm/build-image.sh OUT` (UEFI Shell + dev's kernel + busybox
-      initramfs with xfs/loop modules, `mkfs.xfs`, `xfs_repair`, and our
-      `examples/vm_verify.rs`), out through `SC_BUILD_OUT`. Init per case:
-      mkfs.xfs → vm-verify write (tree + manifest) → xfs_repair -n → kernel
-      mounts and checks the manifest (md5, mode, owner, links, devices,
-      counts) → kernel adds/removes → umount → xfs_repair -n → vm-verify
-      check (reads the kernel's changes) and writes again over the kernel's
-      trees → repair → mount. `VERIFY PASS` / `VERIFY FAIL <why>`.
+- [x] Issue #12 — kernel verification in a throwaway VM (2026-10-06):
+      `tests/vm/` (after mkfs.xfs.rs#11) + `examples/vm_verify.rs`, booted by
+      `stormcentral testhost boot nanatest1`. First pass: run eebe9c7845
+      (kernel 7.2.8, 62 s), 7 geometries, each written by us, xfs_repair -n
+      clean, checked and changed by the kernel, read back and written again
+      by us, clean.
 - [x] Issue #9 — XFS media import (2026-09-27): done in stormblock#147, not
       here. The engine's `POST /api/v1/volumes/import` walks XFS (whole
       volumes and GPT partitions) with this crate; stormblock-registry imports
