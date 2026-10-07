@@ -4,7 +4,7 @@ Userspace file I/O into XFS. Follow fio.ext4.rs's structure and rules (read
 its CLAUDE.md).
 
 - **Crate:** `fio-xfs` (lib `fio_xfs`), binary `fio-xfs`
-- **Version:** 0.3.0 — `Cargo.toml` and `VERSION` must match
+- **Version:** 0.4.0 — `Cargo.toml` and `VERSION` must match
 - **Ships:** as a library by git tag (plus the `fio-xfs` CLI behind the
   default `cli` feature); no service, config or ports, and no golden —
   stormcentral does not list it as a component
@@ -38,27 +38,11 @@ its CLAUDE.md).
       and tail, clean after the kernel replays it. stormblock#198 consumes it.
 - [ ] Issue #7 (P3) — realtime-device files: `read_inode_range` returns
       `Unsupported` for `XFS_DIFLAG_REALTIME` inodes
-- [ ] Issue #5 — write (IN PROGRESS, 2026-10-06): stormblock seeds XFS
-      templates with it (`mkdir_all` + `write` + `flush`, as with fio-ext4).
-      Plan, v5 (CRC) filesystems only (mkfs-xfs makes nothing else; v4 is
-      refused with `Unsupported`):
-      - `BlockDevice::write_at`/`flush` (provided methods; read-only devices
-        say `Unsupported`), `FileDevice::open_rw`, writable `MemDevice`.
-      - `alloc` module: per-AG state loaded on first write (free extents
-        from the bnobt, inobt records, rmap records, every block of the
-        bno/cnt/rmap/inobt/finobt trees). Extents and inode chunks come out
-        of it in memory.
-      - File data and inodes are written through; directories are kept as
-        entry lists and serialised at `flush` in whichever form fits
-        (short form, block, leaf, node), so a big directory costs one write.
-      - `flush` rebuilds each touched AG's bno/cnt/rmap/inobt/finobt trees
-        from the in-memory records (bulk load, as xfs_repair phase 5 does),
-        then the AGF, AGI and superblock counters.
-      - API: write/write_with, mkdir(_with), mkdir_all(_with), symlink,
-        mknod, link, unlink, rmdir, chmod, chown, set_time, flush.
-      - Not in this round: xattrs, rename, append/write_at, reflinked files.
-      - Verified by `xfs_repair -n` on every image written, by reading back,
-        and by the kernel test mounting a written image.
+- [x] Issue #5 — write (2026-10-06, v0.4.0): v5 only; `alloc` (per-AG state,
+      tree rebuild at flush), `btree` (bulk loader), `dirwrite` (four directory
+      forms), `write` (the Volume API). Verified: tests/write.rs (xfs_repair -n
+      everywhere), the kernel test and the testhost boot VM (#12). Not yet:
+      xattrs, rename, write_at/append, reflinked files.
 - [x] Issue #12 — kernel verification in a throwaway VM (2026-10-06):
       `tests/vm/` (after mkfs.xfs.rs#11) + `examples/vm_verify.rs`, booted by
       `stormcentral testhost boot nanatest1`. First pass: run eebe9c7845
@@ -73,8 +57,8 @@ its CLAUDE.md).
 
 ## Where things stand (2026-10-06)
 
-v0.3.0: dirty-log detection (#6) done and tagged. Open: #4, #5, #7, #8.
-In progress: #5 (write), see the work plan.
+v0.4.0: write support (#5) and the testhost boot VM check (#12) done and
+tagged. Open: #4, #7, #8.
 
 ## Things learned the hard way (issue #1)
 

@@ -3,17 +3,6 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-10-06
-- **feat:** Write v5 filesystems (#5): `Volume::write`/`write_with`, `mkdir`/`mkdir_with`, `mkdir_all`/`mkdir_all_with`, `symlink`, `mknod`, `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `Attrs`, `Special`. Free space, inode chunks, free-inode records, reverse mappings and bmap B+trees are kept in memory and the AG B+trees rebuilt at `flush`; directories are laid out at `flush` in short form, block, leaf or node form
-- **feat:** `BlockDevice::write_at` and `flush` (provided; a device that does not implement them is read-only), `FileDevice::open_rw`, `MemDevice` writable
-- **feat:** `Superblock` gains `meta_uuid`, `inode_align`, `spino_align`, `imax_pct`, `features_log_incompat`, feature helpers and AG/inode number conversions; `FileType::code`/`from_ftype`; `Extent::encode`; `crc::stamp`
-- **BREAKING:** `Error` gains `Exists`, `NotEmpty`, `NoSpace`
-- **test:** kernel verification in a throwaway VM (#12): `tests/vm/build-image.sh` and `tests/vm/init.sh` (after mkfs.xfs.rs#11), `examples/vm_verify.rs`; run with `stormcentral testhost boot nanatest1`
-- **test:** `write::v5_big_inodes` expects the 40-name directory in short form when 2 KiB inodes hold it (#14)
-- **fix:** a symlink target may be at most 1023 bytes, as the kernel and `xfs_repair` require (`symlink` allowed 1024) (#5)
-- **fix:** unit tests `dirwrite::tests::entry_sizes` and `btree::tests::bmap_levels_stop_at_the_inode_root` expected the wrong values (a 4-byte name's entry rounds to 16 bytes; a 4 KiB bmap block holds 251 records) (#11)
-- **test:** `tests/write.rs` (xfs_repair -n on everything written, across geometries and feature sets); the kernel test mounts images written here, reads them and changes them
-
 ### 2026-09-28
 - **docs:** Fourth refresh from the code (no code changes since v0.2.0; README, crate docs and CLAUDE.md rechecked against the code and against stormblock's use of v0.2.0): README lists the by-inode API (`inode`, `read_inode_range`, `walk_each`, …) and `pack_tar`, `exists`, `get_xattr`, `read_link_bytes`; no docs promise found that the code does not keep, so no new issues
 
@@ -22,6 +11,24 @@
 - **docs:** CLAUDE.md: where things stand at the session restart; #9 in the work plan
 - **docs:** Second refresh from the code: README and crate docs say a dirty log is not detected (#6), how realtime files fail (#7), the lookup cost is #8, and what `Volume::open` refuses; CLAUDE.md work plan lists #6, #7 and #8
 - **docs:** Refreshed from the code: the crate description no longer promises writing (issue #5); how it ships (git tag, `cli` feature, no golden); which v5 checksums are checked; symlink-following and lookup cost; what `extract` creates; the first reads `Volume::open` makes; mkfs-xfs's on-disk layer (#4) in the work plan
+
+## [v0.4.0] — 2026-10-06
+
+### Added
+- Write v5 filesystems (#5): `Volume::write`/`write_with`, `mkdir`/`mkdir_with`, `mkdir_all`/`mkdir_all_with`, `symlink` (targets up to 1023 bytes), `mknod`, `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `Attrs`, `Special`. Free space, inode chunks, free-inode records, reverse mappings and bmap B+trees are kept in memory, and the AG B+trees are rebuilt at `flush`; directories are laid out at `flush` in short form, block, leaf or node form
+- `BlockDevice::write_at` and `flush` (provided; a device that does not implement them is read-only), `FileDevice::open_rw`, writable `MemDevice`
+- `Superblock` gains `meta_uuid`, `inode_align`, `spino_align`, `imax_pct`, `features_log_incompat`, feature helpers and AG/inode number conversions; `FileType::code`/`from_ftype`; `Extent::encode`; `crc::stamp`
+
+### Breaking
+- `Error` gains `Exists`, `NotEmpty`, `NoSpace`
+
+### Fixed
+- unit test expectations for directory entry sizes and bmap block capacity (#11)
+
+### Tests
+- `tests/write.rs`: everything written is checked by `xfs_repair -n` across geometries and feature sets, and read back (#5, #14)
+- the kernel test mounts images written here, reads them and changes them
+- kernel verification in a throwaway VM through `stormcentral testhost boot` (#12): `tests/vm/`, `examples/vm_verify.rs`
 
 ## [v0.3.0] — 2026-10-06
 
