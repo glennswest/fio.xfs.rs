@@ -4,7 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-10
-- **test:** The write tests, the kernel test's written images and the testhost VM check make their filesystems with `mkfs.xfs -n parent=0`: xfsprogs 7 (the Fedora 44 build VMs) turns parent pointers on by default, which the writer refuses, so every write test failed before reaching its checks (#14, #18, #19). Writing parent pointers is #20
+- **test:** The write tests, the kernel test's written images and the testhost VM check make their filesystems with `mkfs.xfs -n parent=0`: xfsprogs 7 (the Fedora 44 build VMs) turns parent pointers on by default, which the writer refuses, so every write test failed before reaching its checks (#14, #18, #19, #21). Writing parent pointers is #20
 
 ### 2026-09-28
 - **docs:** Fourth refresh from the code (no code changes since v0.2.0; README, crate docs and CLAUDE.md rechecked against the code and against stormblock's use of v0.2.0): README lists the by-inode API (`inode`, `read_inode_range`, `walk_each`, …) and `pack_tar`, `exists`, `get_xattr`, `read_link_bytes`; no docs promise found that the code does not keep, so no new issues

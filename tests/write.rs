@@ -360,7 +360,8 @@ async fn into_a_populated_image() {
     }
     tree.file("big.bin", bytes(9, 1 << 20));
     tree.file("sparse.bin", sparse(50));
-    let img = build(&tree, &[], 512);
+    // No parent pointers: the writer refuses them (#20).
+    let img = build(&tree, &["-n", "parent=0"], 512);
     repair_clean(&img, "as made");
 
     let mut vol = open_rw(&img).await;
