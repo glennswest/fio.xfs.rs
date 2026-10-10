@@ -800,7 +800,8 @@ fn written(kernel: &Path, initrd: &Path, dir: &Path) {
     for (label, opts) in [("written", &[][..]), ("written-1k", &["-b", "size=1024", "-n", "size=8192"][..])] {
         let image = dir.join(format!("{label}.xfs"));
         std::fs::File::create(&image).unwrap().set_len(1 << 30).unwrap();
-        let o = Command::new("mkfs.xfs").args(["-q", "-f"]).args(opts).arg(&image).output().unwrap();
+        // No parent pointers (xfsprogs 7's default): the writer refuses them (#20).
+        let o = Command::new("mkfs.xfs").args(["-q", "-f", "-n", "parent=0"]).args(opts).arg(&image).output().unwrap();
         assert!(o.status.success(), "mkfs.xfs: {}", String::from_utf8_lossy(&o.stderr));
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {

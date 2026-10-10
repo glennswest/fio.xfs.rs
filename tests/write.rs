@@ -22,12 +22,13 @@ fn skip() -> bool {
     false
 }
 
-/// An empty filesystem made by `mkfs.xfs`.
+/// An empty filesystem made by `mkfs.xfs`. Parent pointers (on by default
+/// from xfsprogs 7) are turned off: the writer refuses them (#20).
 fn fresh(opts: &[&str], size_mb: u64) -> Image {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fs.xfs");
     std::fs::File::create(&path).unwrap().set_len(size_mb << 20).unwrap();
-    run(Command::new("mkfs.xfs").args(["-q", "-f"]).args(opts).arg(&path));
+    run(Command::new("mkfs.xfs").args(["-q", "-f", "-n", "parent=0"]).args(opts).arg(&path));
     Image { dir, path }
 }
 

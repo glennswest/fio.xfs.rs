@@ -43,6 +43,11 @@ its CLAUDE.md).
       forms), `write` (the Volume API). Verified: tests/write.rs (xfs_repair -n
       everywhere), the kernel test and the testhost boot VM (#12). Not yet:
       xattrs, rename, write_at/append, reflinked files.
+- [ ] Issue #14 (P0, with #18, #19) — write tests failing on the build VM:
+      the 2 KiB-inode fix (f5ca250) was never verified; on the Fedora 44
+      build VMs mkfs.xfs 7.1.1 turns parent pointers on, which the writer
+      refuses, so the tests now pass `-n parent=0` (2026-10-10).
+- [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [x] Issue #12 — kernel verification in a throwaway VM (2026-10-06):
       `tests/vm/` (after mkfs.xfs.rs#11) + `examples/vm_verify.rs`, booted by
       `stormcentral testhost boot nanatest1`. First pass: run eebe9c7845

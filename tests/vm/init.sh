@@ -115,8 +115,9 @@ do
     name=${case%%:*}; rest=${case#*:}; size=${rest%%:*}; opts=${rest#*:}
     img=/work/$name.img
     rm -f "$img"; truncate -s "$size" "$img" || fail "$name: truncate"
+    # No parent pointers (xfsprogs 7's default): the writer refuses them (#20).
     # shellcheck disable=SC2086
-    mkfs.xfs -q -f $opts "$img" >/work/err 2>&1 || fail "$name: mkfs.xfs: $(cat /work/err)"
+    mkfs.xfs -q -f -n parent=0 $opts "$img" >/work/err 2>&1 || fail "$name: mkfs.xfs: $(cat /work/err)"
 
     vm_verify write "$img" /work/m1 2>/work/err || fail "$name: vm_verify write: $(cat /work/err)"
     repair "$img" "$name: as fio-xfs wrote it"

@@ -30,7 +30,7 @@ filesystems (#5).
 
 | Writes | |
 |---|---|
-| Filesystems | v5 (CRC) only — what `mkfs.xfs` has made by default since 2015 and all `mkfs-xfs` makes — with finobt, rmapbt, reflink, inobtcount, bigtime, 64-bit extent counts and sparse inodes, each on or off. Refused (`Error::Unsupported`): v4, case-insensitive names, parent pointers, metadir, zoned, a log that is not clean |
+| Filesystems | v5 (CRC) only — what `mkfs.xfs` has made by default since 2015 and all `mkfs-xfs` makes — with finobt, rmapbt, reflink, inobtcount, bigtime, 64-bit extent counts and sparse inodes, each on or off. Refused (`Error::Unsupported`): v4, case-insensitive names, parent pointers (on by default from xfsprogs 7: make the filesystem with `mkfs.xfs -n parent=0` to write into it; #20), metadir, zoned, a log that is not clean |
 | Operations | `write` (create or replace a whole file), `mkdir`, `mkdir_all`, `symlink` (targets up to 1023 bytes), `mknod` (devices, FIFOs, sockets), `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `*_with` variants take `Attrs` (mode, uid, gid) |
 | Kept true | free space (by block and by length), inode chunks and free-inode records, reverse mappings, bmap B+trees for files with more extents than their inode holds, every directory form, every checksum, AGF/AGI/superblock counters — `xfs_repair -n` finds nothing, and the kernel mounts, reads and goes on writing the result |
 | Not yet | extended attributes, rename, writing into the middle of a file, realtime files; rewriting or removing a file whose extents are shared (reflinked) is refused |
