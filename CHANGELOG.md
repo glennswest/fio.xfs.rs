@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-10
+- **docs:** Refreshed from the code (changes since 2026-10-02: v0.3.0 dirty-log check, v0.4.0 write side, the #14 test fix): README lists every write refusal `check_writable` makes (no `ftype`, unknown or log-incompatible features, more than 64 inodes per block), the log limitations now filed (#15 replay, #16 torn-write trim, #17 external log), and that write tests use `-n parent=0` while read tests keep mkfs's defaults; CLAUDE.md work plan and status list #15, #16, #17. No docs promise found that the code does not keep, so no new issues
 - **test:** The write tests, the kernel test's written images and the testhost VM check make their filesystems with `mkfs.xfs -n parent=0`: xfsprogs 7 (the Fedora 44 build VMs) turns parent pointers on by default, which the writer refuses, so every write test failed before reaching its checks (#14, #18, #19, #21). Writing parent pointers is #20
 
 ### 2026-09-28

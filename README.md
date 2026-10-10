@@ -24,13 +24,13 @@ filesystems (#5).
 | Directories | short form, block, leaf and node |
 | Symlinks | inline and remote |
 | Extended attributes | short form, leaf and node, remote values; XFS ACLs shown as `system.posix_acl_*`; parent pointers hidden |
-| The log | checked, not replayed: `Volume::open` finds the log's head and tail as the kernel does before a mount, and opens only a filesystem whose last log record is an unmount record (#6). A log on its own device cannot be seen, so it is not checked (`LogState::External`) |
+| The log | checked, not replayed: `Volume::open` finds the log's head and tail as the kernel does before a mount, and opens only a filesystem whose last log record is an unmount record (#6). A log on its own device cannot be seen, so it is not checked and not refused (`LogState::External`, #17). Torn writes after the head are not trimmed as the kernel does, so a log the kernel would find clean can occasionally be reported dirty (#16) |
 | Not read | files on a realtime device — `walk` lists them, reading one is `Error::Unsupported` (#7) |
 | Refused at open | a dirty log — not cleanly unmounted, so changes may be in the log and not on disk (`Error::DirtyLog`; mount it once to replay it, or read it as it stands with `open_norecovery`); a log that cannot be made sense of (`Error::Corrupt`); v4 without v2 directories; v5 with unknown incompatible features or `NEEDSREPAIR` set; any superblock that fails its checksum |
 
 | Writes | |
 |---|---|
-| Filesystems | v5 (CRC) only — what `mkfs.xfs` has made by default since 2015 and all `mkfs-xfs` makes — with finobt, rmapbt, reflink, inobtcount, bigtime, 64-bit extent counts and sparse inodes, each on or off. Refused (`Error::Unsupported`): v4, case-insensitive names, parent pointers (on by default from xfsprogs 7: make the filesystem with `mkfs.xfs -n parent=0` to write into it; #20), metadir, zoned, a log that is not clean |
+| Filesystems | v5 (CRC) only — what `mkfs.xfs` has made by default since 2015 and all `mkfs-xfs` makes — with finobt, rmapbt, reflink, inobtcount, bigtime, 64-bit extent counts and sparse inodes, each on or off. Refused (`Error::Unsupported`): v4, case-insensitive names, directories without file types (`-n ftype=0`), parent pointers (on by default from xfsprogs 7: make the filesystem with `mkfs.xfs -n parent=0` to write into it; #20), metadir, zoned, unknown features, log-incompatible features set, more than 64 inodes per block, a log that is not clean (an external log is not checked) |
 | Operations | `write` (create or replace a whole file), `mkdir`, `mkdir_all`, `symlink` (targets up to 1023 bytes), `mknod` (devices, FIFOs, sockets), `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `*_with` variants take `Attrs` (mode, uid, gid) |
 | Kept true | free space (by block and by length), inode chunks and free-inode records, reverse mappings, bmap B+trees for files with more extents than their inode holds, every directory form, every checksum, AGF/AGI/superblock counters — `xfs_repair -n` finds nothing, and the kernel mounts, reads and goes on writing the result |
 | Not yet | extended attributes, rename, writing into the middle of a file, realtime files; rewriting or removing a file whose extents are shared (reflinked) is refused |
@@ -75,7 +75,7 @@ let vol = Volume::open_norecovery(dev).await?;
 println!("{}", vol.log_state()); // clean | dirty (head H, tail T) | external | unreadable
 ```
 
-Nothing here replays the log; the kernel does, on the next mount.
+Nothing here replays the log; the kernel does, on the next mount (#15).
 
 Writing needs a device that can be written (`FileDevice::open_rw`,
 `MemDevice`, or any `BlockDevice` that implements `write_at`) and a
@@ -178,11 +178,11 @@ that need real tools and say so and pass when they are missing:
   without unmounting; the image is refused as dirty with the log head and
   tail `xfs_logprint` reports, and after a second boot replays the log and
   unmounts, it opens clean with every file written before the crash.
-  Last, the kernel mounts images this crate wrote (4 KiB blocks, and 1 KiB
+  Last, the kernel mounts images this crate wrote (made with `-n parent=0`; 4 KiB blocks, and 1 KiB
   blocks with 8 KiB directory blocks), reads every file, adds and removes
   names in every directory form and writes a file of its own; `xfs_repair
   -n` passes before and after, and the kernel's changes read back here.
-- `tests/write.rs` — filesystems made by `mkfs.xfs`, written by this crate
+- `tests/write.rs` — filesystems made by `mkfs.xfs -n parent=0` (#20), written by this crate
   and checked by `xfs_repair -n`, then read back: files of every size,
   owners and modes, every directory form, inline and remote symlinks,
   devices, hard links, replaced and removed files, a fragmented file under
@@ -191,7 +191,7 @@ that need real tools and say so and pass when they are missing:
   and with finobt, rmapbt, reflink, bigtime, inobtcount, nrext64 and sparse
   inodes all off; into an image xfsprogs populated; through `MemDevice`.
 
-They run on the build box through `sc-build`.
+The read tests keep `mkfs.xfs`'s defaults, so on xfsprogs 7 they read filesystems with parent pointers. They run on a fresh build VM through `sc-build`.
 
 **The kernel in a throwaway VM (#12).** `tests/vm/build-image.sh` (run by
 sc-build) makes a UEFI disk image: the UEFI Shell starts the build box's
@@ -199,7 +199,7 @@ kernel with a busybox initramfs holding the xfs and loop modules, xfsprogs'
 `mkfs.xfs` and `xfs_repair`, and `examples/vm_verify.rs`. Its init
 (`tests/vm/init.sh`) runs seven geometries (512 MB – 2 GiB; 1, 4 and 16 KiB
 blocks; 8 KiB directory blocks; 2 KiB inodes; 4 KiB sectors; 16 AGs; every
-optional feature off): `mkfs.xfs`, then this crate writes a tree with a
+optional feature off): `mkfs.xfs -n parent=0`, then this crate writes a tree with a
 manifest, `xfs_repair -n`, the kernel loop-mounts it and checks every name in
 the manifest (contents by md5, mode, owner, link count, symlink targets,
 device numbers, directory sizes), then adds and removes names in every

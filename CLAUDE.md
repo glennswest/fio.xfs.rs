@@ -49,6 +49,10 @@ its CLAUDE.md).
       writer refuses), the write tests make images with `-n parent=0`. The read
       tests keep mkfs's defaults. Verified: full sc-build of 1951acb passes.
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
+- [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
+- [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC
+      trim, so a clean log can occasionally be reported dirty
+- [ ] Issue #15 (P3) — log replay (read a crashed image as mounted)
 - [x] Issue #12 — kernel verification in a throwaway VM (2026-10-06):
       `tests/vm/` (after mkfs.xfs.rs#11) + `examples/vm_verify.rs`, booted by
       `stormcentral testhost boot nanatest1`. First pass: run eebe9c7845
@@ -61,10 +65,11 @@ its CLAUDE.md).
       media through that API. XFS for the registry's own PVC blank ladder
       (`pvc-ext4j-*`) is stormcos#91's decision, not work in this crate.
 
-## Where things stand (2026-10-06)
+## Where things stand (2026-10-10)
 
 v0.4.0: write support (#5) and the testhost boot VM check (#12) done and
-tagged. Open: #4, #7, #8.
+tagged; since then only tests changed (#14: `-n parent=0` for write-test
+images, unreleased). Open: #20, #17 (P2); #4, #7, #8, #15, #16 (P3).
 
 ## Things learned the hard way (issue #1)
 
