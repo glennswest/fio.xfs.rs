@@ -23,7 +23,7 @@ its CLAUDE.md).
 - [x] Read: superblock/AGs, inodes (local, extents, B+tree forks), directories (short-form, block, leaf, node), symlinks, xattrs
 - [x] Walk and extract a tree (`walk`, `pack_tar_to`, `extract`)
 - [x] Tests against real XFS images: `tests/mkfs_images.rs` (mkfs.xfs -p +
-      xfs_db attr_set, 7 geometries/versions) and `tests/kernel.rs` (dev's
+      xfs_db attr_set, 7 geometries/versions) and `tests/kernel.rs` (the build VM's
       own kernel populates images under qemu/KVM, unprivileged)
 - [ ] Issue #8 (P3) — hashed name lookup through the leaf/node index: `lookup` scans a
       directory's data blocks, which is fine for `walk` (by inode) but
@@ -65,7 +65,7 @@ its CLAUDE.md).
       media through that API. XFS for the registry's own PVC blank ladder
       (`pvc-ext4j-*`) is stormcos#91's decision, not work in this crate.
 
-## Where things stand (2026-10-10)
+## Where things stand (2026-11-07)
 
 v0.4.0: write support (#5) and the testhost boot VM check (#12) done and
 tagged; since then only tests changed (#14: `-n parent=0` for write-test
@@ -92,9 +92,9 @@ images, unreleased). Open: #20, #17 (P2); #4, #7, #8, #15, #16 (P3).
   A crash in the kernel test is `sync()` then power off without umount.
 - **The testhost boot VM (#12):** `tests/vm/` builds a UEFI disk through
   sc-build (`SC_BUILD_OUT`), booted by `stormcentral testhost boot
-  nanatest1` (fio.xfs.rs is in its project list). The guest runs dev's
+  nanatest1` (fio.xfs.rs is in its project list). The guest runs the build VM's
   `mkfs.xfs`/`xfs_repair` copied in with their libraries.
-- **Kernel tests without root:** dev's `/dev/kvm` is world-writable and the
+- **Kernel tests without root:** the build VM's `/dev/kvm` is world-writable and the
   kernel and modules are readable, so `tests/kernel.rs` boots
   `/boot/vmlinuz-$(uname -r)` (or `/lib/modules/$(uname -r)/vmlinuz`) with an initramfs whose `/init` is the
   test binary itself (plus its shared libraries and `xfs.ko`).
