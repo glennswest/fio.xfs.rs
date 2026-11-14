@@ -65,7 +65,7 @@ its CLAUDE.md).
       media through that API. XFS for the registry's own PVC blank ladder
       (`pvc-ext4j-*`) is stormcos#91's decision, not work in this crate.
 
-## Where things stand (2026-11-07)
+## Where things stand (2026-11-14)
 
 v0.4.0: write support (#5) and the testhost boot VM check (#12) done and
 tagged; since then only tests changed (#14: `-n parent=0` for write-test

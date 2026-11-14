@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-14
+- **docs:** Refreshed from the code (nothing changed since 2026-11-07 but a research note; src, tests and Cargo.toml are untouched since v0.4.0): README and CLAUDE.md rechecked against the code and the open issues (#4, #7, #8, #15, #16, #17, #20); nothing promised that the code does not do, so no new issues
+
 ### 2026-11-07
 - **docs:** Refreshed from the code (no code changes since 2026-10-16; only research notes were added): CLAUDE.md says the kernel test and testhost VM use the build VM's kernel, `/dev/kvm`, `mkfs.xfs` and `xfs_repair`, not dev's (retired 2026-10-07; #22). README checked: nothing promised that the code does not do, so no new issues
 
