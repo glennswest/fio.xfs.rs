@@ -33,6 +33,7 @@ filesystems (#5).
 | Filesystems | v5 (CRC) only — what `mkfs.xfs` has made by default since 2015 and all `mkfs-xfs` makes — with finobt, rmapbt, reflink, inobtcount, bigtime, 64-bit extent counts and sparse inodes, each on or off. Refused (`Error::Unsupported`): v4, case-insensitive names, directories without file types (`-n ftype=0`), parent pointers (on by default from xfsprogs 7: make the filesystem with `mkfs.xfs -n parent=0` to write into it; #20), metadir, zoned, unknown features, log-incompatible features set, more than 64 inodes per block, a log that is not clean (an external log is not checked) |
 | Operations | `write` (create or replace a whole file), `mkdir`, `mkdir_all`, `symlink` (targets up to 1023 bytes), `mknod` (devices, FIFOs, sockets), `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `*_with` variants take `Attrs` (mode, uid, gid) |
 | Kept true | free space (by block and by length), inode chunks and free-inode records, reverse mappings, bmap B+trees for files with more extents than their inode holds, every directory form, every checksum, AGF/AGI/superblock counters — `xfs_repair -n` finds nothing, and the kernel mounts, reads and goes on writing the result |
+| Quotas | counts are not kept: on a filesystem with quotas, the first change clears the quota "checked" flags in the superblock (flushed before anything else is written; accounting and enforcement stay on), so the kernel recounts (quotacheck) at its next mount with quotas on — what `xfs_repair` does when it finds counts wrong |
 | Not yet | extended attributes, rename, writing into the middle of a file, realtime files; rewriting or removing a file whose extents are shared (reflinked) is refused |
 
 ## Library
@@ -190,6 +191,11 @@ that need real tools and say so and pass when they are missing:
   blocks with 8 KiB directory blocks), reads every file, adds and removes
   names in every directory form and writes a file of its own; `xfs_repair
   -n` passes before and after, and the kernel's changes read back here.
+  Then quotas: the kernel turns user, group and project quotas on and
+  writes a file for uid 1000, this crate adds another, and at the next
+  quota mount the kernel's counts for that user and group equal what
+  `stat` says the files take; a control image with the "checked" flags put
+  back shows the kernel keeping the stale count.
 - `tests/write.rs` — filesystems made by `mkfs.xfs -n parent=0` (#20), written by this crate
   and checked by `xfs_repair -n`, then read back: files of every size,
   owners and modes, every directory form, inline and remote symlinks,

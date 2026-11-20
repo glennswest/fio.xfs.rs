@@ -453,3 +453,49 @@ async fn in_memory() {
     assert_eq!(vol.read("/cmdline").await.unwrap(), b"console=ttyS0\n");
     assert_eq!(vol.read("/etc/stormblock/boot.toml").await.unwrap(), b"[boot]\nroot = \"xfs\"\n");
 }
+
+/// Review finding 01a341965933: the writer keeps no quota counts, so its
+/// first change clears the quota "checked" flags in the superblock (the
+/// kernel then recounts at its next quota mount) and keeps the accounting
+/// and enforcement flags. Opening, reading or a refused change clear
+/// nothing. The kernel test checks the recount itself.
+#[tokio::test]
+async fn first_change_invalidates_quota_counts() {
+    use fio_xfs::sb::{quota, QFLAGS_OFFSET};
+    if skip() {
+        return;
+    }
+    const ENFD: u16 = 0x0002 | 0x0080 | 0x0200;
+    let on = quota::ALL_ACCT | quota::UQUOTA_CHKD | quota::GQUOTA_CHKD | quota::PQUOTA_CHKD | ENFD;
+    let img = fresh(&[], 512);
+    let qflags = |path: &std::path::Path| {
+        let b = std::fs::read(path).unwrap();
+        u16::from_be_bytes([b[QFLAGS_OFFSET], b[QFLAGS_OFFSET + 1]])
+    };
+    {
+        let mut b = std::fs::read(&img.path).unwrap();
+        b[QFLAGS_OFFSET..QFLAGS_OFFSET + 2].copy_from_slice(&on.to_be_bytes());
+        let sect = u16::from_be_bytes([b[102], b[103]]) as usize;
+        fio_xfs::crc::stamp(&mut b[..sect], 224);
+        std::fs::write(&img.path, b).unwrap();
+    }
+
+    let mut vol = open_rw(&img).await;
+    assert!(vol.superblock().quota_counts_trusted());
+    vol.read_dir("/").await.unwrap();
+    assert!(vol.write("/no/such/dir/x", b"x").await.is_err());
+    vol.flush().await.unwrap();
+    drop(vol);
+    assert_eq!(qflags(&img.path), on, "nothing changed, so nothing cleared");
+
+    let mut vol = open_rw(&img).await;
+    vol.write_with("/owned", &bytes(9, 100_000), &Attrs::mode(0o644).owner(1000, 1000)).await.unwrap();
+    // Cleared on disk before the flush: a crash now still forces a recount.
+    assert_eq!(qflags(&img.path), quota::ALL_ACCT | ENFD, "cleared at the first change");
+    assert!(!vol.superblock().quota_counts_trusted());
+    vol.flush().await.unwrap();
+    drop(vol);
+    assert_eq!(qflags(&img.path), quota::ALL_ACCT | ENFD);
+    let vol = img.open().await;
+    assert_eq!(vol.read("/owned").await.unwrap(), bytes(9, 100_000));
+}

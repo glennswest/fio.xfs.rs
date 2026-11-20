@@ -60,6 +60,33 @@ pub mod ro_compat {
     pub const KNOWN: u32 = FINOBT | RMAPBT | REFLINK | INOBTCOUNT;
 }
 
+/// Quota flags, in `sb_qflags`.
+pub mod quota {
+    /// User quotas are accounted.
+    pub const UQUOTA_ACCT: u16 = 0x0001;
+    /// User quota counts are known to be right.
+    pub const UQUOTA_CHKD: u16 = 0x0004;
+    /// Project quotas are accounted.
+    pub const PQUOTA_ACCT: u16 = 0x0008;
+    /// Group or project quota counts are right (version 4 only).
+    pub const OQUOTA_CHKD: u16 = 0x0020;
+    /// Group quotas are accounted.
+    pub const GQUOTA_ACCT: u16 = 0x0040;
+    /// Group quota counts are right.
+    pub const GQUOTA_CHKD: u16 = 0x0100;
+    /// Project quota counts are right.
+    pub const PQUOTA_CHKD: u16 = 0x0400;
+
+    /// Any kind of quota accounted.
+    pub const ALL_ACCT: u16 = UQUOTA_ACCT | GQUOTA_ACCT | PQUOTA_ACCT;
+    /// Every "counts are right" flag. With one clear, the kernel recounts
+    /// that kind (quotacheck) the next time it mounts with it on.
+    pub const ALL_CHKD: u16 = UQUOTA_CHKD | OQUOTA_CHKD | GQUOTA_CHKD | PQUOTA_CHKD;
+}
+
+/// Byte offset of `sb_qflags` in the superblock.
+pub const QFLAGS_OFFSET: usize = 176;
+
 /// `versionnum` bit: case-insensitive directory names (`-n version=ci`).
 pub const VERSION_BORGBIT: u16 = 0x4000;
 
@@ -127,6 +154,8 @@ pub struct Superblock {
     pub imax_pct: u8,
     /// Log-incompatible features.
     pub features_log_incompat: u32,
+    /// Quota flags (`sb_qflags`): what is accounted, enforced and counted.
+    pub qflags: u16,
 }
 
 
@@ -179,6 +208,7 @@ impl Superblock {
             spino_align: if version == 5 { be32(buf, 228) } else { 0 },
             imax_pct: buf[127],
             features_log_incompat: if version == 5 { be32(buf, 220) } else { 0 },
+            qflags: be16(buf, QFLAGS_OFFSET),
         };
         let mut sb = sb;
         if sb.features_incompat & incompat::META_UUID != 0 {
@@ -215,18 +245,26 @@ impl Superblock {
             v => return Err(Error::Unsupported(format!("superblock version {v}"))),
         }
 
+        // Every log field is bounded before anything is shifted by it: an
+        // image is untrusted, and a shift past the integer's width panics
+        // (review finding 63188b025c7e).
         let bs = sb.block_size;
         if !(512..=65536).contains(&bs)
             || !bs.is_power_of_two()
+            || !(9..=16).contains(&sb.block_log)
             || 1u32 << sb.block_log != bs
             || !sb.inode_size.is_power_of_two()
             || !(256..=2048).contains(&sb.inode_size)
             || sb.inodes_per_block as u32 * sb.inode_size as u32 != bs
+            // 65536 / 256: at most 256 inodes in a block.
+            || sb.inopb_log > 8
             || 1u32 << sb.inopb_log != sb.inodes_per_block as u32
             || sb.ag_count == 0
             || sb.ag_blocks == 0
-            || (sb.ag_blocks as u64) > 1u64 << sb.agblk_log
             || sb.agblk_log > 31
+            || (sb.ag_blocks as u64) > 1u64 << sb.agblk_log
+            // A directory block is at most 64 KiB, so at most 2^7 blocks.
+            || sb.dirblk_log > 7
             || (bs as u64) << sb.dirblk_log > 65536
         {
             return Err(Error::Corrupt("superblock geometry".into()));
@@ -291,6 +329,15 @@ impl Superblock {
     /// Whether the AGI counts the inode B+trees' blocks.
     pub fn has_inobtcount(&self) -> bool {
         self.features_ro_compat & ro_compat::INOBTCOUNT != 0
+    }
+
+    /// Whether some quota counts on disk are marked right (a "checked"
+    /// flag is set; the kernel consults it whenever that kind of quota is
+    /// on at mount, whatever is accounted on disk now). A writer that does not
+    /// keep the counts (this one) must clear those flags before it changes
+    /// anything, or the kernel trusts stale counts (finding 01a341965933).
+    pub fn quota_counts_trusted(&self) -> bool {
+        self.qflags & quota::ALL_CHKD != 0
     }
 
     /// Whether the writer can change this filesystem, and if not, why not.
@@ -394,5 +441,90 @@ impl Superblock {
         }
         Ok(((agno * self.ag_blocks as u64 + agbno) << self.block_log)
             + index * self.inode_size as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytes::{put16, put32, put64};
+
+    /// A plausible v5 superblock: 4 KiB blocks, 512-byte inodes, 4 AGs of
+    /// 2^16 blocks, checksum stamped.
+    fn good() -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        put32(&mut b, 0, MAGIC);
+        put32(&mut b, 4, 4096);
+        put64(&mut b, 8, 4 << 16);
+        put64(&mut b, 56, 128);
+        put32(&mut b, 84, 1 << 16);
+        put32(&mut b, 88, 4);
+        put16(&mut b, 100, 0xb4a5);
+        put16(&mut b, 102, 512);
+        put16(&mut b, 104, 512);
+        put16(&mut b, 106, 8);
+        b[120] = 12; // block_log
+        b[121] = 9; // sectlog
+        b[122] = 9; // inodelog
+        b[123] = 3; // inopb_log
+        b[124] = 16; // agblk_log
+        put32(&mut b, 216, incompat::FTYPE);
+        b
+    }
+
+    fn parse(mut b: Vec<u8>) -> Result<Superblock> {
+        crc::stamp(&mut b, 224);
+        Superblock::parse(&b)
+    }
+
+    #[test]
+    fn the_base_superblock_parses() {
+        let sb = parse(good()).unwrap();
+        assert_eq!((sb.block_size, sb.block_log, sb.inopb_log, sb.agblk_log), (4096, 12, 3, 16));
+        assert_eq!(sb.qflags, 0);
+        assert!(!sb.quota_counts_trusted());
+        sb.check_writable().unwrap();
+    }
+
+    /// Finding 63188b025c7e: every log field at every out-of-range value is
+    /// refused as corrupt, never a panic, in v5 (checksummed) and v4 alike.
+    #[test]
+    fn out_of_range_log_fields_are_corrupt_not_a_panic() {
+        // (offset, the value that is right)
+        for (off, right) in [(120usize, 12u8), (123, 3), (124, 16), (192, 0)] {
+            for v in 0..=255u8 {
+                if v == right {
+                    continue;
+                }
+                for version in [5u16, 4] {
+                    let mut b = good();
+                    b[off] = v;
+                    if version == 4 {
+                        put16(&mut b, 100, 0x2004 | 0x0400); // DIRV2 | LOGV2
+                        put32(&mut b, 216, 0);
+                    }
+                    let r = std::panic::catch_unwind(|| parse(b.clone()));
+                    let r = r.unwrap_or_else(|_| panic!("offset {off} = {v} (v{version}) panicked"));
+                    match r {
+                        Err(Error::Corrupt(_)) => {}
+                        // A larger directory block (offset 192, 1..=4) or AG
+                        // log (offset 124, 17..=31) is a valid geometry.
+                        Ok(_) if (off == 192 && v <= 4) || (off == 124 && (17..=31).contains(&v)) => {}
+                        other => panic!("offset {off} = {v} (v{version}): {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quota_checked_flags_are_seen() {
+        let mut b = good();
+        put16(&mut b, QFLAGS_OFFSET, quota::UQUOTA_ACCT | quota::UQUOTA_CHKD);
+        let sb = parse(b).unwrap();
+        assert!(sb.quota_counts_trusted());
+        let mut b = good();
+        put16(&mut b, QFLAGS_OFFSET, quota::UQUOTA_ACCT | quota::GQUOTA_ACCT);
+        assert!(!parse(b).unwrap().quota_counts_trusted());
     }
 }

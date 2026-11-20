@@ -3,6 +3,10 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-20 (#25)
+- **fix:** (security, review finding 63188b025c7e) `Superblock::parse` shifted by `block_log`, `inopb_log` and `agblk_log` before checking them, so a crafted superblock (v5 with a valid checksum, or v4) panicked on open; every log field (`dirblk_log` too) is now bounded before any shift and out-of-range geometry is `Error::Corrupt`. Unit tests try every value of each field, v4 and v5
+- **fix:** (review finding 01a341965933) writing a filesystem with quotas left its quota counts marked checked, so the kernel trusted stale counts at the next quota mount. `Superblock` now has `qflags` and `quota_counts_trusted()`; the writer's first change clears the quota "checked" flags in the primary superblock and flushes it before anything else, so the kernel recounts. Tested in `tests/write.rs` and by the kernel test (recount matches `stat`; a control image with the flags put back keeps the stale count)
+
 ## [v0.4.1] — 2026-11-20
 
 ### Fixed

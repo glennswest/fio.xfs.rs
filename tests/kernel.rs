@@ -23,6 +23,10 @@
 //! own — growing the B+trees this crate built — and unmounts. `xfs_repair -n`
 //! passes after each side, and the kernel's changes read back here.
 //!
+//! And quotas: the kernel turns them on and writes a file for uid 1000,
+//! this crate writes another, and the kernel's counts at the next quota
+//! mount must include it (a control with the old flags put back must not).
+//!
 //! Needs `/dev/kvm`, `qemu-system-x86_64`, `mkfs.xfs` and a readable kernel
 //! and modules for the running kernel; without them it says what is missing
 //! and passes. No root: the VM is root inside, the host side never is.
@@ -41,6 +45,15 @@ const DONE: &str = "FIO-XFS-POPULATED";
 const CRASH: &str = "fioxfs.crash";
 const REMOUNT: &str = "fioxfs.remount";
 const WRITTEN: &str = "fioxfs.written";
+/// Mount with user, group and project quotas and write a file for `QUOTA_ID`.
+const QUOTA_ON: &str = "fioxfs.quotaon";
+/// Mount with quotas and print the kernel's counts for `QUOTA_ID` beside
+/// what `stat` says its files take.
+const QUOTA_COUNT: &str = "fioxfs.quotacount";
+const QUOTA_OPTS: &str = "uquota,gquota,pquota";
+const QUOTA_ID: u32 = 1000;
+/// The kernel's file, then this crate's, both owned by `QUOTA_ID`.
+const QUOTA_FILES: [(&str, usize); 2] = [("q/kernel", 64 << 10), ("q/ours", 1 << 20)];
 
 /// What this crate writes for the kernel to read, under `w/`: paths and
 /// contents. Directories are made as needed.
@@ -368,6 +381,24 @@ mod guest {
             println!("{DONE}");
             power_off();
         }
+        if cmdline.split_whitespace().any(|w| w == QUOTA_ON) {
+            mount("/dev/vda", "/mnt", "xfs", QUOTA_OPTS);
+            check("mkdir q", unsafe { libc::mkdir(cstr(b"/mnt/q").as_ptr(), 0o755) });
+            let (name, len) = QUOTA_FILES[0];
+            std::fs::write(Path::new("/mnt").join(name), bytes(30, len)).unwrap();
+            let c = cstr(format!("/mnt/{name}").as_bytes());
+            check("chown", unsafe { libc::chown(c.as_ptr(), QUOTA_ID, QUOTA_ID) });
+            check("umount", unsafe { libc::umount(m.as_ptr()) });
+            println!("{DONE}");
+            power_off();
+        }
+        if cmdline.split_whitespace().any(|w| w == QUOTA_COUNT) {
+            mount("/dev/vda", "/mnt", "xfs", QUOTA_OPTS);
+            quota_counts();
+            check("umount", unsafe { libc::umount(m.as_ptr()) });
+            println!("{DONE}");
+            power_off();
+        }
         if cmdline.split_whitespace().any(|w| w == REMOUNT) {
             // Mounting replays the log; unmounting leaves it clean.
             mount("/dev/vda", "/mnt", "xfs", "");
@@ -387,6 +418,34 @@ mod guest {
     fn fail(what: String) -> ! {
         println!("FIO-XFS-FAILED {what}");
         power_off();
+    }
+
+    /// For user and group `QUOTA_ID`, print the kernel's inode and block
+    /// counts (`Q_XGETQUOTA`, blocks of 512 bytes) and the files under
+    /// `/mnt/q` that `stat` says it owns, with their `st_blocks`:
+    /// `FIO-XFS-QUOTA <kind> <icount> <bcount> <files> <blocks>`.
+    fn quota_counts() {
+        use std::os::unix::fs::MetadataExt;
+        let (mut files, mut blocks) = (0u64, 0u64);
+        for e in std::fs::read_dir("/mnt/q").unwrap() {
+            let md = e.unwrap().metadata().unwrap();
+            if md.uid() == QUOTA_ID {
+                files += 1;
+                blocks += md.blocks();
+            }
+        }
+        let dev = cstr(b"/dev/vda");
+        for (kind, qtype) in [("user", 0), ("group", 1)] {
+            // struct fs_disk_quota: d_bcount at byte 40, d_icount at 48.
+            let mut q = [0u64; 16];
+            let cmd = (0x5803 << 8) | qtype; // QCMD(Q_XGETQUOTA, type)
+            let r = unsafe {
+                libc::syscall(libc::SYS_quotactl, cmd, dev.as_ptr(), QUOTA_ID as libc::c_int, q.as_mut_ptr())
+            };
+            check(&format!("quotactl {kind}"), r as libc::c_int);
+            let (bcount, icount) = (q[5], q[6]);
+            println!("FIO-XFS-QUOTA {kind} {icount} {bcount} {files} {blocks}");
+        }
     }
 
     /// Read what this crate wrote, then change it.
@@ -722,7 +781,8 @@ fn main() {
 
     crash(&kernel, &initrd, dir.path());
     written(&kernel, &initrd, dir.path());
-    println!("test result: ok. kernel-populated images verified, a crashed one refused, a written one mounted");
+    quota(&kernel, &initrd, dir.path());
+    println!("test result: ok. kernel-populated images verified, a crashed one refused, a written one mounted, quotas recounted");
 }
 
 fn boot_ok(kernel: &Path, initrd: &Path, image: &Path, mode: &str) {
@@ -835,6 +895,90 @@ fn written(kernel: &Path, initrd: &Path, dir: &Path) {
         });
         println!("{label}: xfs_repair agrees before and after, and the kernel's changes read back");
     }
+}
+
+/// The kernel's quota counts for `QUOTA_ID` after a boot in `QUOTA_COUNT`
+/// mode: (kind, icount, bcount, files, blocks) per kind.
+fn quota_boot(kernel: &Path, initrd: &Path, image: &Path) -> Vec<(String, u64, u64, u64, u64)> {
+    let console = boot(kernel, initrd, image, QUOTA_COUNT).expect("boot");
+    if !console.contains(DONE) {
+        let tail: Vec<&str> = console.lines().rev().take(60).collect();
+        panic!("{QUOTA_COUNT}: the VM did not finish:\n{}", tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+    }
+    let rows: Vec<_> = console
+        .lines()
+        .filter_map(|l| {
+            let w: Vec<&str> = l[l.find("FIO-XFS-QUOTA ")?..].split_whitespace().collect();
+            let n = |i: usize| w.get(i)?.trim().parse::<u64>().ok();
+            Some((w.get(1)?.to_string(), n(2)?, n(3)?, n(4)?, n(5)?))
+        })
+        .collect();
+    assert_eq!(rows.len(), 2, "user and group counts in:\n{console}");
+    rows
+}
+
+fn qflags(image: &Path) -> u16 {
+    let mut b = [0u8; 2];
+    use std::os::unix::fs::FileExt;
+    std::fs::File::open(image).unwrap().read_exact_at(&mut b, fio_xfs::sb::QFLAGS_OFFSET as u64).unwrap();
+    u16::from_be_bytes(b)
+}
+
+/// Review finding 01a341965933: quotas the kernel turned on, a file this
+/// crate adds, and the kernel's counts at the next quota mount must take it
+/// in (the writer cleared the "checked" flags, so the kernel recounts). A
+/// control image, the same but with the flags put back as the old writer
+/// left them, shows the kernel trusting stale counts: the test can see the bug.
+fn quota(kernel: &Path, initrd: &Path, dir: &Path) {
+    use fio_xfs::sb::quota::ALL_CHKD;
+    use fio_xfs::{Attrs, FileDevice, Volume};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    for control in [false, true] {
+        let label = if control { "quota-control" } else { "quota" };
+        let image = dir.join(format!("{label}.xfs"));
+        std::fs::File::create(&image).unwrap().set_len(1 << 30).unwrap();
+        let o = Command::new("mkfs.xfs").args(["-q", "-f", "-n", "parent=0"]).arg(&image).output().unwrap();
+        assert!(o.status.success(), "mkfs.xfs: {}", String::from_utf8_lossy(&o.stderr));
+        boot_ok(kernel, initrd, &image, QUOTA_ON);
+        let before = qflags(&image);
+        assert!(before & ALL_CHKD != 0, "{label}: the kernel left no quota checked: {before:#x}");
+
+        rt.block_on(async {
+            let mut vol = Volume::open(FileDevice::open_rw(&image).await.unwrap()).await.unwrap();
+            let (name, len) = QUOTA_FILES[1];
+            let attrs = Attrs::mode(0o644).owner(QUOTA_ID, QUOTA_ID);
+            vol.write_with(&format!("/{name}"), &bytes(31, len), &attrs).await.unwrap();
+            vol.flush().await.unwrap();
+        });
+        let after = qflags(&image);
+        assert_eq!(after, before & !ALL_CHKD, "{label}: the writer clears exactly the checked flags");
+        repair_clean(&image, &format!("{label}: as fio-xfs wrote it"));
+
+        if control {
+            let mut b = std::fs::read(&image).unwrap();
+            let at = fio_xfs::sb::QFLAGS_OFFSET;
+            b[at..at + 2].copy_from_slice(&before.to_be_bytes());
+            let sect = u16::from_be_bytes([b[102], b[103]]) as usize;
+            fio_xfs::crc::stamp(&mut b[..sect], 224);
+            std::fs::write(&image, b).unwrap();
+        }
+
+        let rows = quota_boot(kernel, initrd, &image);
+        for (kind, icount, bcount, files, blocks) in rows {
+            assert_eq!(files, 2, "{label}: files owned by {QUOTA_ID}");
+            println!("{label}: {kind} {QUOTA_ID}: kernel counts {icount} inodes, {bcount} blocks; stat says {files}, {blocks}");
+            if control {
+                assert_eq!(icount, 1, "{label}: {kind}: the kernel should have trusted the stale count");
+            } else {
+                assert_eq!((icount, bcount), (files, blocks), "{label}: {kind}: the kernel's recount");
+            }
+        }
+        if !control {
+            assert_eq!(qflags(&image) & ALL_CHKD, before & ALL_CHKD, "{label}: checked again after the recount");
+            repair_clean(&image, &format!("{label}: after the kernel recounted"));
+        }
+    }
+    println!("quota: the kernel recounted after fio-xfs wrote; with the flags left set it would not have");
 }
 
 async fn verify(image: &Path) {

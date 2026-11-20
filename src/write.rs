@@ -33,7 +33,7 @@ use crate::dirwrite::{self, DirEnt, Layout};
 use crate::error::{corrupt, Error, Result};
 use crate::inode::{mode, Format, Inode, Timestamp};
 use crate::log::LogState;
-use crate::sb::Superblock;
+use crate::sb::{quota, Superblock, QFLAGS_OFFSET};
 use crate::volume::Volume;
 
 /// The fixed part of a v3 inode, before its forks.
@@ -302,7 +302,9 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
-    fn writer(&mut self) -> Result<&mut Writer> {
+    /// The writer's state, made on the first change. Every change asks for
+    /// it before it touches the device.
+    async fn writer(&mut self) -> Result<&mut Writer> {
         if self.w.is_none() {
             self.sb.check_writable()?;
             if !matches!(self.log, LogState::Clean | LogState::External) {
@@ -310,9 +312,30 @@ impl<D: BlockDevice> Volume<D> {
                     "writing: the log is not clean; mount and unmount the filesystem once first".into(),
                 ));
             }
+            if self.sb.quota_counts_trusted() {
+                self.invalidate_quota_counts().await?;
+            }
             self.w = Some(Box::new(Writer::new()));
         }
         Ok(self.w.as_mut().unwrap())
+    }
+
+    /// This writer keeps no quota counts, so before its first change it
+    /// clears every quota "checked" flag in the primary superblock and
+    /// flushes it: whatever happens after, the kernel recounts (quotacheck)
+    /// the next time it mounts with quotas on, as it does after `xfs_repair`
+    /// clears them. Accounting and enforcement flags stay as they were
+    /// (review finding 01a341965933).
+    async fn invalidate_quota_counts(&mut self) -> Result<()> {
+        let mut sbuf = vec![0u8; self.sb.sect()];
+        self.dev.read_at(0, &mut sbuf).await?;
+        let qflags = be16(&sbuf, QFLAGS_OFFSET) & !quota::ALL_CHKD;
+        put16(&mut sbuf, QFLAGS_OFFSET, qflags);
+        crc::stamp(&mut sbuf, 224);
+        self.dev.write_at(0, &sbuf).await?;
+        self.dev.flush().await?;
+        self.sb.qflags = qflags;
+        Ok(())
     }
 
     fn w(&mut self) -> &mut Writer {
@@ -321,7 +344,7 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Make sure AG `agno` is in memory.
     async fn load_ag(&mut self, agno: u32) -> Result<()> {
-        self.writer()?;
+        self.writer().await?;
         if !self.w().ags.contains_key(&agno) {
             let ag = Ag::load(&self.dev, &self.sb, agno).await?;
             self.w().ags.insert(agno, ag);
@@ -646,7 +669,7 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Directory `dino`'s names, held in memory from now until the flush.
     async fn dir_state(&mut self, dino: u64) -> Result<&mut DirState> {
-        self.writer()?;
+        self.writer().await?;
         if !self.w().dirs.contains_key(&dino) {
             let dir = self.inode(dino).await?;
             let mut parent = dino;
@@ -739,7 +762,7 @@ impl<D: BlockDevice> Volume<D> {
         if self.entry(dino, &name).await?.is_some() {
             return Err(Error::Exists(path.into()));
         }
-        self.writer()?;
+        self.writer().await?;
         let (pref, _) = self.sb.ino_to_agino(dino);
         let ino = self.alloc_ino(pref).await?;
         let raw = self.new_raw(ino, mode, uid, gid, nlink);
@@ -768,7 +791,7 @@ impl<D: BlockDevice> Volume<D> {
         let (dino, name) = self.parent_dir(path).await?;
         match self.entry(dino, &name).await? {
             Some((ino, FileType::File)) => {
-                self.writer()?;
+                self.writer().await?;
                 let inode = self.inode(ino).await?;
                 if inode.flags2 & DIFLAG2_REFLINK != 0 {
                     return Err(Error::Unsupported(format!("{path}: rewriting a file with shared extents")));
@@ -963,7 +986,7 @@ impl<D: BlockDevice> Volume<D> {
         if self.entry(dino, &name).await?.is_some() {
             return Err(Error::Exists(new_path.into()));
         }
-        self.writer()?;
+        self.writer().await?;
         let mut raw = self.read_raw(ino).await?;
         raw.set_nlink(raw.nlink() + 1);
         let now = self.now();
@@ -983,7 +1006,7 @@ impl<D: BlockDevice> Volume<D> {
         if kind == FileType::Directory {
             return Err(Error::IsADirectory(path.into()));
         }
-        self.writer()?;
+        self.writer().await?;
         let inode = self.inode(ino).await?;
         if inode.nlink <= 1 {
             self.destroy(&inode).await?;
@@ -1009,7 +1032,7 @@ impl<D: BlockDevice> Volume<D> {
         if self.dir_entries(&inode).await?.len() > 2 {
             return Err(Error::NotEmpty(path.into()));
         }
-        self.writer()?;
+        self.writer().await?;
         self.destroy(&inode).await?;
         self.w().dirs.remove(&ino);
         self.dir_state(dino).await?.names.remove(&name);
@@ -1021,7 +1044,7 @@ impl<D: BlockDevice> Volume<D> {
     /// Change permission bits, following symlinks.
     pub async fn chmod(&mut self, path: &str, perms: u16) -> Result<()> {
         let ino = self.resolve(path.as_bytes(), true).await?;
-        self.writer()?;
+        self.writer().await?;
         let mut raw = self.read_raw(ino).await?;
         raw.set_mode(raw.mode() & mode::IFMT | perms & 0o7777);
         let now = self.now();
@@ -1032,7 +1055,7 @@ impl<D: BlockDevice> Volume<D> {
     /// Change the owner, following symlinks.
     pub async fn chown(&mut self, path: &str, uid: u32, gid: u32) -> Result<()> {
         let ino = self.resolve(path.as_bytes(), true).await?;
-        self.writer()?;
+        self.writer().await?;
         let mut raw = self.read_raw(ino).await?;
         raw.set_owner(uid, gid);
         let now = self.now();
