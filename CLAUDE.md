@@ -4,7 +4,7 @@ Userspace file I/O into XFS. Follow fio.ext4.rs's structure and rules (read
 its CLAUDE.md).
 
 - **Crate:** `fio-xfs` (lib `fio_xfs`), binary `fio-xfs`
-- **Version:** 0.4.0 — `Cargo.toml` and `VERSION` must match
+- **Version:** 0.4.1 — `Cargo.toml` and `VERSION` must match
 - **Ships:** as a library by git tag (plus the `fio-xfs` CLI behind the
   default `cli` feature); no service, config or ports, and no golden —
   stormcentral does not list it as a component
@@ -48,11 +48,12 @@ its CLAUDE.md).
       Fedora 44 build VMs' mkfs.xfs 7.1.1 turns parent pointers on (which the
       writer refuses), the write tests make images with `-n parent=0`. The read
       tests keep mkfs's defaults. Verified: full sc-build of 1951acb passes.
-- [ ] Issue #23 (P0) — review finding 112925e105eb (and its twin
+- [x] Issue #23 (P0, 2026-11-20, v0.4.1) — review finding 112925e105eb (and its twin
       4d9887e4883e): `extract` trusted on-disk names as host paths. Names
       checked when a directory is read (no empty, `/`, NUL), duplicates
       refused by `walk`, path components checked and `O_EXCL` in `extract`;
-      `tests/hostile_names.rs`. Other open findings (majors) follow as P1.
+      `tests/hostile_names.rs`. Verified: sc-build of 89b242e, all suites.
+      Other open findings (majors) follow as P1.
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC

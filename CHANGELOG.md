@@ -3,6 +3,17 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v0.4.1] — 2026-11-20
+
+### Fixed
+- (security, #23; findings 112925e105eb, 4d9887e4883e) `extract` no longer trusts on-disk names as host paths: names that are empty or hold `/` or NUL are `Corrupt` on every directory read, a name stored twice is `Corrupt` to `walk`, `extract` checks each path component and creates files with `O_EXCL`
+
+### Changed
+- (test, #14) Write tests make their images with `mkfs.xfs -n parent=0` (xfsprogs 7 turns parent pointers on)
+
+### Documentation
+- README: how names from the image are checked; doc refreshes of 2026-09-27 to 2026-11-14
+
 ### 2026-11-20
 - **fix:** (security, P0, #23; review findings 112925e105eb, 4d9887e4883e) `extract` joined on-disk directory names onto `dest` unchecked, so a crafted image with a `../` name wrote outside `dest`, and one name stored twice (a symlink, then a file) wrote through the symlink. Directory reads now refuse a name that is empty or holds `/` or NUL as `Corrupt`; `walk` (and so `pack_tar_to` and `extract`) refuses a name stored twice; `extract` checks each path component (no empty, `.`, `..`) and creates files with `O_EXCL`. Tested by `tests/hostile_names.rs` (mkfs images with an entry rewritten in place) and a unit test of the path check
 

@@ -135,7 +135,7 @@ A library crate with a CLI, not a service: no configuration, no ports.
 Consumers depend on it by git tag, as they do on fio-ext4:
 
 ```toml
-fio-xfs = { git = "https://github.com/glennswest/fio.xfs.rs", tag = "v0.4.0", default-features = false }
+fio-xfs = { git = "https://github.com/glennswest/fio.xfs.rs", tag = "v0.4.1", default-features = false }
 ```
 
 The default `cli` feature builds the `fio-xfs` binary (clap, anyhow, the
