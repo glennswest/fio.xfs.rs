@@ -54,7 +54,7 @@ async fn dot_dot_name_is_refused_and_nothing_escapes() {
     let mut t = Tree::default();
     t.dir("d");
     file(&mut t, "d/aaaaaaaaaaaa", b"pwned\n");
-    let img = build(&t, &[], 64);
+    let img = build(&t, &[], 512);
     rename_raw(&img, "/d", b"aaaaaaaaaaaa", b"../../escape").await;
 
     let vol = img.open().await;
@@ -77,7 +77,7 @@ async fn slash_in_name_is_refused() {
     let mut t = Tree::default();
     t.dir("d");
     file(&mut t, "d/abcdef", b"x\n");
-    let img = build(&t, &[], 64);
+    let img = build(&t, &[], 512);
     rename_raw(&img, "/d", b"abcdef", b"ab/def").await;
 
     let vol = img.open().await;
@@ -100,7 +100,7 @@ async fn duplicate_name_cannot_write_through_a_symlink() {
     t.dir("d");
     t.items.insert("d/link".into(), Want::Symlink(victim.to_str().unwrap().as_bytes().to_vec()));
     file(&mut t, "d/linq", b"pwned\n");
-    let img = build(&t, &[], 64);
+    let img = build(&t, &[], 512);
     rename_raw(&img, "/d", b"linq", b"link").await;
 
     let vol = img.open().await;
