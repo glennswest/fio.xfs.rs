@@ -110,6 +110,14 @@ through its hash index, so one lookup in a very large directory costs a
 read of the whole directory (#8); `walk`, `pack_tar_to` and `extract` go by
 inode and do not pay that.
 
+Names from the image are not trusted. A directory entry that is empty or
+holds a `/` or NUL (the kernel's `xfs_dir2_namecheck`) is `Error::Corrupt`
+wherever a directory is read, and a name stored twice in one directory is
+`Corrupt` to `walk`, `pack_tar_to` and `extract`. `extract` also checks
+every component of each path it writes (no empty, `.` or `..`), and creates
+files with `O_EXCL`, so nothing it writes lands outside `dest` or through a
+symlink it made.
+
 Below the path API is one by inode, for callers that walk a tree
 themselves: `inode`, `extents`, `read_inode_range`, `read_dir_inode`,
 `symlink_target`, `xattrs_inode`, `stat_inode` and `resolve`; `walk_each`

@@ -181,7 +181,7 @@ impl<D: BlockDevice> Volume<D> {
         let mut dirs: Vec<(PathBuf, u16, Timestamp)> = Vec::new();
         for e in self.walk(root).await? {
             let st = e.stat;
-            let path = dest.join(std::ffi::OsStr::from_bytes(&e.raw_path));
+            let path = host_path(dest, &e.raw_path)?;
             let inode = self.inode(st.inode).await?;
             let ftype = st.mode & mode::IFMT;
             if !st.is_dir() && st.links > 1 {
@@ -208,7 +208,9 @@ impl<D: BlockDevice> Volume<D> {
                     report.symlinks += 1;
                 }
                 mode::IFREG => {
-                    let mut f = tokio::fs::File::create(&path).await?;
+                    // create_new (O_EXCL): never through a name already
+                    // there, a symlink least of all.
+                    let mut f = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&path).await?;
                     let extents = self.extents(&inode, false).await?;
                     let mut off = 0;
                     while off < st.size {
@@ -248,6 +250,20 @@ impl<D: BlockDevice> Volume<D> {
     }
 }
 
+/// Where a walked name goes under `dest`. Each component must be a plain
+/// name — not empty, `.` or `..`, and without a NUL — so nothing read from
+/// the image can point outside `dest`.
+fn host_path(dest: &Path, raw: &[u8]) -> Result<PathBuf> {
+    let mut path = dest.to_path_buf();
+    for c in raw.split(|&b| b == b'/') {
+        if c.is_empty() || c == b"." || c == b".." || c.contains(&0) {
+            return Err(Error::Corrupt(format!("unsafe path {:?}", String::from_utf8_lossy(raw))));
+        }
+        path.push(std::ffi::OsStr::from_bytes(c));
+    }
+    Ok(path)
+}
+
 /// Write `buf` at the file's position, seeking over every all-zero 4 KiB
 /// piece rather than writing it, so holes stay holes (as `cp --sparse`).
 async fn write_sparse(f: &mut tokio::fs::File, buf: &[u8]) -> Result<()> {
@@ -282,5 +298,19 @@ fn system_time(t: Timestamp) -> std::time::SystemTime {
         UNIX_EPOCH + Duration::new(t.secs as u64, t.nsecs)
     } else {
         UNIX_EPOCH - Duration::from_secs(t.secs.unsigned_abs()) + Duration::from_nanos(t.nsecs as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_path_keeps_names_under_dest() {
+        let d = Path::new("/dest");
+        assert_eq!(host_path(d, b"a/b c").unwrap(), Path::new("/dest/a/b c"));
+        for bad in [&b"../x"[..], b"a/../../x", b"/etc/passwd", b"a//b", b"a/./b", b".", b"", b"a\0b", b"a/"] {
+            assert!(matches!(host_path(d, bad), Err(Error::Corrupt(_))), "{bad:?}");
+        }
     }
 }

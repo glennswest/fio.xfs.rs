@@ -373,6 +373,16 @@ impl<D: BlockDevice> Volume<D> {
             if e.name == b"." || e.name == b".." {
                 continue;
             }
+            // The kernel's xfs_dir2_namecheck: a name is a path component.
+            // One that is empty or holds a `/` or NUL is corruption, and
+            // whoever joins it onto a host path would go somewhere else.
+            if e.name.is_empty() || e.name.iter().any(|&b| b == b'/' || b == 0) {
+                return Err(corrupt(format!(
+                    "directory inode {}: invalid name {:?}",
+                    inode.ino,
+                    String::from_utf8_lossy(&e.name)
+                )));
+            }
             let kind = match e.ftype {
                 FileType::Unknown => FileType::from_mode(self.inode(e.ino).await?.mode),
                 k => k,
@@ -702,6 +712,11 @@ impl<D: BlockDevice> Volume<D> {
     async fn sorted_children(&self, dir: &Inode) -> Result<Vec<Entry>> {
         let mut names = self.read_dir_inode(dir).await?;
         names.sort_by(|a, b| b.raw_name.cmp(&a.raw_name));
+        // One name twice in a directory is corruption; extracting it would
+        // write the second over the first (or through it, were it a symlink).
+        if let Some(w) = names.windows(2).find(|w| w[0].raw_name == w[1].raw_name) {
+            return Err(corrupt(format!("directory inode {}: name {:?} twice", dir.ino, w[0].name)));
+        }
         Ok(names)
     }
 }

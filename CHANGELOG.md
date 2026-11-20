@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** (security, P0, #23; review findings 112925e105eb, 4d9887e4883e) `extract` joined on-disk directory names onto `dest` unchecked, so a crafted image with a `../` name wrote outside `dest`, and one name stored twice (a symlink, then a file) wrote through the symlink. Directory reads now refuse a name that is empty or holds `/` or NUL as `Corrupt`; `walk` (and so `pack_tar_to` and `extract`) refuses a name stored twice; `extract` checks each path component (no empty, `.`, `..`) and creates files with `O_EXCL`. Tested by `tests/hostile_names.rs` (mkfs images with an entry rewritten in place) and a unit test of the path check
+
 ### 2026-11-14
 - **docs:** Refreshed from the code (nothing changed since 2026-11-07 but a research note; src, tests and Cargo.toml are untouched since v0.4.0): README and CLAUDE.md rechecked against the code and the open issues (#4, #7, #8, #15, #16, #17, #20); nothing promised that the code does not do, so no new issues
 

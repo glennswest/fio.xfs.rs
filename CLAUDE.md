@@ -48,6 +48,11 @@ its CLAUDE.md).
       Fedora 44 build VMs' mkfs.xfs 7.1.1 turns parent pointers on (which the
       writer refuses), the write tests make images with `-n parent=0`. The read
       tests keep mkfs's defaults. Verified: full sc-build of 1951acb passes.
+- [ ] Issue #23 (P0) — review finding 112925e105eb (and its twin
+      4d9887e4883e): `extract` trusted on-disk names as host paths. Names
+      checked when a directory is read (no empty, `/`, NUL), duplicates
+      refused by `walk`, path components checked and `O_EXCL` in `extract`;
+      `tests/hostile_names.rs`. Other open findings (majors) follow as P1.
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC
