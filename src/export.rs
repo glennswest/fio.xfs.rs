@@ -1,6 +1,6 @@
 //! Getting a tree out: into a tar stream, or onto the local filesystem.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -101,6 +101,14 @@ impl<D: BlockDevice> Volume<D> {
                 mtime: st.mtime,
                 ..Default::default()
             };
+            // A socket is left out before the hard-link map sees it: a later
+            // name must not become a link to a member never written
+            // (review finding 287cd742841f).
+            let ftype = st.mode & mode::IFMT;
+            if ftype == mode::IFSOCK {
+                report.sockets_skipped += 1;
+                continue;
+            }
             if !st.is_dir() && st.links > 1 {
                 if let Some(first) = seen.get(&st.inode) {
                     h.kind = EntryKind::HardLink;
@@ -110,11 +118,6 @@ impl<D: BlockDevice> Volume<D> {
                     continue;
                 }
                 seen.insert(st.inode, e.raw_path.clone());
-            }
-            let ftype = st.mode & mode::IFMT;
-            if ftype == mode::IFSOCK {
-                report.sockets_skipped += 1;
-                continue;
             }
             if ftype != mode::IFLNK {
                 h.xattrs = self.xattrs_inode(&inode).await?.into_iter().map(|x| (x.name, x.value)).collect();
@@ -175,6 +178,7 @@ impl<D: BlockDevice> Volume<D> {
         let mut report = ExtractReport::default();
         tokio::fs::create_dir_all(dest).await?;
         let mut seen: HashMap<u64, PathBuf> = HashMap::new();
+        let mut specials_seen: HashSet<u64> = HashSet::new();
         // Directories get their final mode and time once everything inside
         // them is written: a read-only directory would refuse its children,
         // and each child written would move its time.
@@ -184,13 +188,25 @@ impl<D: BlockDevice> Volume<D> {
             let path = host_path(dest, &e.raw_path)?;
             let inode = self.inode(st.inode).await?;
             let ftype = st.mode & mode::IFMT;
-            if !st.is_dir() && st.links > 1 {
+            // Device nodes, FIFOs and sockets are skipped before the
+            // hard-link map sees them, so every name of one is reported and
+            // none is linked to a path never created; an inode's first path
+            // is recorded only once it exists (review finding 287cd742841f).
+            if !matches!(ftype, mode::IFDIR | mode::IFLNK | mode::IFREG) {
+                // Its attributes once, however many names it has.
+                if st.links <= 1 || specials_seen.insert(st.inode) {
+                    report.xattrs_skipped += self.xattrs_inode(&inode).await?.len() as u64;
+                }
+                report.specials_skipped.push(e.path.clone());
+                continue;
+            }
+            let linked = !st.is_dir() && st.links > 1;
+            if linked {
                 if let Some(first) = seen.get(&st.inode) {
                     tokio::fs::hard_link(first, &path).await?;
                     report.hard_links += 1;
                     continue;
                 }
-                seen.insert(st.inode, path.clone());
             }
             if ftype != mode::IFLNK {
                 report.xattrs_skipped += self.xattrs_inode(&inode).await?.len() as u64;
@@ -207,8 +223,8 @@ impl<D: BlockDevice> Volume<D> {
                     tokio::fs::symlink(std::ffi::OsStr::from_bytes(&target), &path).await?;
                     report.symlinks += 1;
                 }
-                mode::IFREG => {
-                    // create_new (O_EXCL): never through a name already
+                _ => {
+                    // A regular file. create_new (O_EXCL): never through a name already
                     // there, a symlink least of all.
                     let mut f = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&path).await?;
                     let extents = self.extents(&inode, false).await?;
@@ -230,15 +246,13 @@ impl<D: BlockDevice> Volume<D> {
                     set_mode(&path, st.mode).await?;
                     report.files += 1;
                     report.bytes += st.size;
-                    continue;
-                }
-                _ => {
-                    report.specials_skipped.push(e.path.clone());
-                    continue;
                 }
             }
-            if opts.owner {
+            if opts.owner && ftype != mode::IFREG {
                 std::os::unix::fs::lchown(&path, Some(st.uid), Some(st.gid))?;
+            }
+            if linked {
+                seen.insert(st.inode, path);
             }
         }
         for (path, m, mtime) in dirs.into_iter().rev() {
