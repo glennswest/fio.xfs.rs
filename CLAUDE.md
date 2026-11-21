@@ -4,7 +4,7 @@ Userspace file I/O into XFS. Follow fio.ext4.rs's structure and rules (read
 its CLAUDE.md).
 
 - **Crate:** `fio-xfs` (lib `fio_xfs`), binary `fio-xfs`
-- **Version:** 0.4.2 — `Cargo.toml` and `VERSION` must match
+- **Version:** 0.4.3 — `Cargo.toml` and `VERSION` must match
 - **Ships:** as a library by git tag (plus the `fio-xfs` CLI behind the
   default `cli` feature); no service, config or ports, and no golden —
   stormcentral does not list it as a component
@@ -64,7 +64,7 @@ its CLAUDE.md).
       kernel recounts. Verified: sc-build of b3aa485 (all suites, 0
       warnings); the kernel test's recount matches `stat`, and a control
       with the flags put back keeps the stale count.
-- [~] Issue #26 (P1, 2026-11-20, in progress: fixes and tests pushed, sc-build next) — review findings in `src/write.rs`:
+- [x] Issue #26 (P1, 2026-11-21, v0.4.3) — review findings in `src/write.rs`:
       0f02ac950500 (chmod with an access ACL), 1fed3c80f651 (writer reads not
       block-aligned), 793cd4f33612 / a72ebcf6af32 / 03ce0a0cf15e (a failed
       flush drops pending state; a retry falsely succeeds), 8b48ae8c1697
@@ -76,6 +76,11 @@ its CLAUDE.md).
       each directory until it is written and AG dirty state until the device
       flush succeeds, and `Ag::rebuild` restores itself on error; tests with
       an alignment-enforcing and a failure-injecting device.
+      Verified: sc-build of 75289f4 (build, all suites incl. the kernel
+      test, `clippy --all-targets -D warnings` clean; #32's two pre-existing
+      clippy lints fixed on the way). A write that fails part-way through a
+      flush can be retried from nine points, whether the failed write was
+      refused or landed, and `xfs_repair -n` is clean afterwards.
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC
