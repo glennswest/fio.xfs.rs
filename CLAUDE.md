@@ -88,6 +88,12 @@ its CLAUDE.md).
       unit tests on hand-made blocks. Verified: sc-build of 35eb7d5 (build,
       all suites incl. the kernel test, `clippy --all-targets -D warnings`
       clean).
+- [ ] Issue #29 (minor, 2026-11-21) — three review findings:
+      287cd742841f (`export`: hard-linked FIFOs/devices/sockets were put
+      in the hard-link map before being skipped), 97a24c584823 (`sb`: log
+      fields held to their geometry; the shift part was #25's),
+      b8ffbc6331af (`write::alloc_ino`: the inode limit stopped the search
+      before other AGs' free inodes). Tests in `tests/write.rs` and `sb`.
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC

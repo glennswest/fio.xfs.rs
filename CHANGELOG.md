@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-21 (#29)
+- **fix:** (review finding 287cd742841f) `extract` put every multiply-linked inode in its hard-link map before deciding to skip its type, so the second name of a hard-linked FIFO or device node was hard-linked to a path never created and extraction failed; `pack_tar_to` likewise made later names of a socket links to a member it had left out. Special files are now skipped by every name (each listed in `specials_skipped`, their xattrs counted once), and an inode's first path is recorded only once it exists. Test: `tests/write.rs` `hard_linked_specials_are_skipped_by_every_name`
+- **fix:** (review finding 97a24c584823) the superblock's AG log is now held to the AG size (rounded up to a power of two, as the kernel checks), AG log plus inodes-per-block log must fit a 32-bit AG inode number, and the directory block size uses `checked_shl`. The shift-before-bound part was already fixed by #25 (63188b025c7e). Unit test `log_fields_must_match_their_geometry` (including the finding's v4 block log of 44)
+- **fix:** (review finding b8ffbc6331af) at the inode-space limit (`sb_imax_pct`) the writer returned `NoSpace` as soon as the preferred AG had no free inode, though other AGs' chunks did. The limit now stops only new chunks, and every AG is searched for a free inode first (as the kernel's `xfs_dialloc`); the limit is reckoned in whole chunks as `xfs_set_maxicount` does. Test: `tests/write.rs` `inode_limit_still_uses_other_ags_free_inodes`
+
 ## [v0.4.4] — 2026-11-21
 
 ### Fixed
