@@ -238,20 +238,19 @@ pub fn build_bmap(sb: &Superblock, ino: u64, recs: &[[u8; 16]], offsets: &[u64],
             put64(&mut buf, 24, sb.fsb_to_byte(addrs[i])? >> 9);
             buf[40..56].copy_from_slice(&sb.meta_uuid);
             put64(&mut buf, 56, ino);
-            let first_key;
-            if level == 0 {
+            let first_key = if level == 0 {
                 for j in 0..take {
                     buf[LONG_HDR + j * 16..][..16].copy_from_slice(&recs[at + j]);
                 }
-                first_key = offsets[at];
+                offsets[at]
             } else {
                 let part = &below[at..at + take];
                 for (j, (key, ptr)) in part.iter().enumerate() {
                     put64(&mut buf, LONG_HDR + j * 8, *key);
                     put64(&mut buf, LONG_HDR + max * 8 + j * 8, *ptr);
                 }
-                first_key = part[0].0;
-            }
+                part[0].0
+            };
             crc::stamp(&mut buf, 64);
             built.push((first_key, addrs[i]));
             blocks.push((addrs[i], buf));

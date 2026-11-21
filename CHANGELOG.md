@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-21 (#32)
+- **chore:** `cargo clippy --all-targets -D warnings` clean again: two `needless_late_init` lints (clippy 1.95) in `btree::build_bmbt` and `dirwrite`'s node index, rewritten as `let … = if …`; no behaviour change
+
 ### 2026-11-20 (#26)
 - **fix:** (security, review finding 0f02ac950500) `chmod`, and `write_with` on an existing file, left an access ACL granting what the new mode took away; changing the rwx bits of an inode with `system.posix_acl_access` is now `Error::Unsupported` before anything is written (setuid, setgid and sticky may still change)
 - **fix:** (review finding 1fed3c80f651) the writer read inodes, AG headers, the AGFL and the superblock in pieces smaller than a block, against the `BlockDevice` contract; every read after open is now whole blocks at a block boundary (`device::read_aligned`)

@@ -214,12 +214,11 @@ pub fn layout(sb: &Superblock, ino: u64, parent: u64, names: &[DirEnt], fork_siz
             let mut buf = vec![0u8; dbs];
             let back = if i == 0 { 0 } else { addrs[i - 1] as u32 };
             let forw = addrs.get(i + 1).map_or(0, |&a| a as u32);
-            let high;
-            if level == 0 {
+            let high = if level == 0 {
                 da_info(&mut buf, LEAFN, forw, back);
                 let part = &leaf[at..at + take];
                 put_leaf_ents(&mut buf, part);
-                high = part.last().map_or(0, |e| e.0);
+                part.last().map_or(0, |e| e.0)
             } else {
                 da_info(&mut buf, NODE, forw, back);
                 let part = &below[at..at + take];
@@ -229,8 +228,8 @@ pub fn layout(sb: &Superblock, ino: u64, parent: u64, names: &[DirEnt], fork_siz
                     put32(&mut buf, HDR + j * 8, *h);
                     put32(&mut buf, HDR + j * 8 + 4, *before as u32);
                 }
-                high = part.last().map_or(0, |e| e.0);
-            }
+                part.last().map_or(0, |e| e.0)
+            };
             built.push((high, addrs[i]));
             blocks.push(DirBlock { lblk: addrs[i], data: buf, crc_off: 12, blkno_off: 16 });
             at += take;
