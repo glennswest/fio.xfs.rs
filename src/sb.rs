@@ -554,7 +554,7 @@ mod tests {
             parse(b)
         };
         assert_eq!(geometry(256, 1).unwrap().agino_log(), 32);
-        assert!(matches!(geometry(512, 0), Ok(_)));
+        assert!(geometry(512, 0).is_ok());
         // The same with a block of 1024 bytes: four inodes, 33 bits.
         let mut b = good();
         put32(&mut b, 4, 1024);
