@@ -762,3 +762,125 @@ async fn mode_change_refused_with_an_access_acl() {
     assert_eq!(vol.read("/acl").await.unwrap(), b"new\n");
     assert_eq!(vol.stat("/plain").await.unwrap().mode & 0o7777, 0o600);
 }
+
+/// Review finding b8ffbc6331af: at the inode-space limit (`-i maxpct`) no
+/// new chunk may be allocated, but free inodes in another AG's existing
+/// chunks still may be. mkfs puts directories in AGs in turn, so `/d1` is
+/// in AG 1 and the root's chunk in AG 0 keeps free inodes; filling `/d1`
+/// to the limit must then go on into AG 0 until no inode is free anywhere.
+#[tokio::test]
+async fn inode_limit_still_uses_other_ags_free_inodes() {
+    if skip() || !have("xfs_db") {
+        return;
+    }
+    let mut tree = Tree::default();
+    for d in ["d0", "d1", "d2", "d3"] {
+        tree.dir(d);
+    }
+    // 2 KiB inodes, two in a block: 1% of 76800 blocks is 1536 inodes.
+    let img = build(&tree, &["-n", "parent=0", "-d", "agcount=2", "-i", "size=2048,maxpct=1"], 300);
+    let mut vol = open_rw(&img).await;
+    let ag_of = |vol: &Volume<FileDevice>, ino: u64| vol.superblock().ino_to_agino(ino).0;
+    let d1 = vol.stat("/d1").await.unwrap().inode;
+    assert_eq!(ag_of(&vol, d1), 1, "mkfs put /d1 in AG 1");
+    let before = vol.superblock().clone();
+    assert!(before.ifree > 0 && before.imax_pct == 1);
+
+    let mut n = 0u64;
+    let mut in_ag0 = 0u64;
+    let err = loop {
+        match vol.write(&format!("/d1/f{n}"), b"").await {
+            Ok(ino) => {
+                if ag_of(&vol, ino) == 0 {
+                    in_ag0 += 1;
+                }
+                n += 1;
+            }
+            Err(e) => break e,
+        }
+        assert!(n < 4096, "the inode limit never stopped allocation");
+    };
+    assert!(matches!(&err, Error::NoSpace(m) if m.contains("1%")), "{err}");
+    assert!(in_ag0 > 0, "no file took one of AG 0's free inodes");
+    vol.flush().await.unwrap();
+    drop(vol);
+    repair_clean(&img, "after filling to the inode limit");
+
+    let vol = img.open().await;
+    let sb = vol.superblock();
+    assert_eq!(sb.ifree, 0, "free inodes left when allocation stopped");
+    assert!(sb.icount <= 1536, "{} inodes past the 1% limit", sb.icount);
+    assert_eq!(sb.icount - sb.ifree, before.icount - before.ifree + n, "inodes in use");
+    assert_eq!(vol.read_dir("/d1").await.unwrap().len() as u64, n);
+}
+
+/// The ustar members of an archive this crate wrote: (name, type flag,
+/// link target), PAX extended headers left out.
+fn tar_members(tar: &[u8]) -> Vec<(String, u8, String)> {
+    let field = |b: &[u8]| String::from_utf8_lossy(b.split(|&c| c == 0).next().unwrap()).into_owned();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + 512 <= tar.len() && tar[at..at + 512].iter().any(|&b| b != 0) {
+        let h = &tar[at..at + 512];
+        let size = u64::from_str_radix(field(&h[124..136]).trim(), 8).unwrap_or(0) as usize;
+        if h[156] != b'x' && h[156] != b'g' {
+            out.push((field(&h[0..100]), h[156], field(&h[157..257])));
+        }
+        at += 512 + size.div_ceil(512) * 512;
+    }
+    out
+}
+
+/// Review finding 287cd742841f: hard links to a FIFO and to a socket.
+/// Extracting skips every name of each (they take `mknod`) rather than
+/// linking the second to a path never made, and a tar archive leaves out
+/// both names of the socket rather than making the second a link to a
+/// member that is not there. A hard-linked regular file still links.
+#[tokio::test]
+async fn hard_linked_specials_are_skipped_by_every_name() {
+    if skip() {
+        return;
+    }
+    let img = fresh(&[], 300);
+    let mut vol = open_rw(&img).await;
+    vol.mkdir("/d").await.unwrap();
+    vol.mknod("/d/fifo", Special::Fifo, &Attrs::default()).await.unwrap();
+    vol.link("/d/fifo", "/d/fifo2").await.unwrap();
+    vol.mknod("/d/sock", Special::Socket, &Attrs::default()).await.unwrap();
+    vol.link("/d/sock", "/d/sock2").await.unwrap();
+    vol.write("/d/f", b"data\n").await.unwrap();
+    vol.link("/d/f", "/d/f2").await.unwrap();
+    vol.flush().await.unwrap();
+    drop(vol);
+    repair_clean(&img, "after linking specials");
+
+    let vol = img.open().await;
+    let out = tempfile::tempdir().unwrap();
+    let dest = out.path().join("x");
+    let r = vol.extract("/", &dest, &fio_xfs::ExtractOptions::default()).await.unwrap();
+    let mut skipped = r.specials_skipped.clone();
+    skipped.sort();
+    assert_eq!(skipped, ["d/fifo", "d/fifo2", "d/sock", "d/sock2"], "every name of each special");
+    assert_eq!((r.files, r.hard_links), (1, 1), "{r:?}");
+    for p in ["d/fifo", "d/fifo2", "d/sock", "d/sock2"] {
+        assert!(std::fs::symlink_metadata(dest.join(p)).is_err(), "{p} was created");
+    }
+    use std::os::unix::fs::MetadataExt;
+    let (a, b) = (std::fs::metadata(dest.join("d/f")).unwrap(), std::fs::metadata(dest.join("d/f2")).unwrap());
+    assert_eq!((a.ino(), a.nlink()), (b.ino(), 2));
+    assert_eq!(std::fs::read(dest.join("d/f2")).unwrap(), b"data\n");
+
+    let p = vol.pack_tar_to(Vec::new(), "/").await.unwrap();
+    let sink = vol.pack_tar("/").await.unwrap();
+    assert_eq!((p.sockets_skipped, p.hard_links, p.devices, p.files), (2, 2, 1, 1), "{p:?}");
+    let members = tar_members(&sink);
+    let names: Vec<&str> = members.iter().map(|m| m.0.as_str()).collect();
+    assert!(!names.iter().any(|n| n.contains("sock")), "{names:?}");
+    for (i, (name, kind, link)) in members.iter().enumerate() {
+        if *kind == b'1' {
+            assert!(names[..i].contains(&link.as_str()), "{name} links to {link}, not an earlier member: {names:?}");
+        }
+    }
+    let fifo2 = members.iter().find(|m| m.0 == "d/fifo2").expect("d/fifo2 in the archive");
+    assert_eq!((fifo2.1, fifo2.2.as_str()), (b'1', "d/fifo"));
+}
