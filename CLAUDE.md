@@ -4,7 +4,7 @@ Userspace file I/O into XFS. Follow fio.ext4.rs's structure and rules (read
 its CLAUDE.md).
 
 - **Crate:** `fio-xfs` (lib `fio_xfs`), binary `fio-xfs`
-- **Version:** 0.4.3 — `Cargo.toml` and `VERSION` must match
+- **Version:** 0.4.4 — `Cargo.toml` and `VERSION` must match
 - **Ships:** as a library by git tag (plus the `fio-xfs` CLI behind the
   default `cli` feature); no service, config or ports, and no golden —
   stormcentral does not list it as a component
@@ -81,11 +81,13 @@ its CLAUDE.md).
       clippy lints fixed on the way). A write that fails part-way through a
       flush can be retried from nine points, whether the failed write was
       refused or landed, and `xfs_repair -n` is clean afterwards.
-- [ ] Issue #27 (P1, 2026-11-21) — review finding 15cd3aece9ef in
+- [x] Issue #27 (P1, 2026-11-21, v0.4.4) — review finding 15cd3aece9ef in
       `src/dir.rs`: a live entry in a data block's last 8 bytes indexed past
       the block reading its name length (panic, not `Corrupt`). The entry
       header must fit first, and a free record must stay within the names;
-      unit tests on hand-made blocks.
+      unit tests on hand-made blocks. Verified: sc-build of 35eb7d5 (build,
+      all suites incl. the kernel test, `clippy --all-targets -D warnings`
+      clean).
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC
