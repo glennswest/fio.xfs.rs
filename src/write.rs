@@ -142,6 +142,17 @@ impl Special {
 struct DirState {
     parent: u64,
     names: BTreeMap<Vec<u8>, (u64, u8)>,
+    /// The inode and data fork as they were on disk, kept from the first
+    /// attempt to write the directory out: if that attempt's inode write
+    /// fails, what is on disk may be the new inode or neither, and a retry
+    /// must still know which blocks are the old ones.
+    disk: Option<DiskDir>,
+}
+
+/// A directory's inode bytes and fork map before it is rewritten.
+struct DiskDir {
+    raw: Vec<u8>,
+    map: (Vec<Extent>, Vec<u64>),
 }
 
 /// What the write side holds between flushes.
@@ -154,15 +165,19 @@ pub(crate) struct Writer {
     /// could not be undone: every later change and flush is refused, so
     /// none can report success over it.
     poisoned: Option<String>,
+    /// The primary superblock's sector, as the writer last wrote it: the
+    /// flush changes its counters here rather than reading back a sector a
+    /// failed write may have left torn.
+    sb_sector: Vec<u8>,
 }
 
 impl Writer {
-    fn new() -> Self {
+    fn new(sb_sector: Vec<u8>) -> Self {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9e37_79b9_7f4a_7c15);
-        Writer { ags: BTreeMap::new(), dirs: BTreeMap::new(), rng: seed | 1, new_chunks: 0, poisoned: None }
+        Writer { ags: BTreeMap::new(), dirs: BTreeMap::new(), rng: seed | 1, new_chunks: 0, poisoned: None, sb_sector }
     }
 
     /// A directory's names, `.` and `..` first, when it is held in memory.
@@ -345,10 +360,14 @@ impl<D: BlockDevice> Volume<D> {
                     "writing: the log is not clean; mount and unmount the filesystem once first".into(),
                 ));
             }
-            if self.sb.quota_counts_trusted() {
-                self.invalidate_quota_counts().await?;
+            let mut sector = read_aligned(&self.dev, self.sb.block_size as u64, 0, self.sb.sect()).await?;
+            if be32(&sector, 0) != crate::sb::MAGIC || !crc::verify(&sector, 224) {
+                return Err(corrupt("primary superblock: magic or checksum"));
             }
-            self.w = Some(Box::new(Writer::new()));
+            if self.sb.quota_counts_trusted() {
+                self.invalidate_quota_counts(&mut sector).await?;
+            }
+            self.w = Some(Box::new(Writer::new(sector)));
         }
         Ok(self.w.as_mut().unwrap())
     }
@@ -359,12 +378,11 @@ impl<D: BlockDevice> Volume<D> {
     /// the next time it mounts with quotas on, as it does after `xfs_repair`
     /// clears them. Accounting and enforcement flags stay as they were
     /// (review finding 01a341965933).
-    async fn invalidate_quota_counts(&mut self) -> Result<()> {
-        let mut sbuf = read_aligned(&self.dev, self.sb.block_size as u64, 0, self.sb.sect()).await?;
-        let qflags = be16(&sbuf, QFLAGS_OFFSET) & !quota::ALL_CHKD;
-        put16(&mut sbuf, QFLAGS_OFFSET, qflags);
-        crc::stamp(&mut sbuf, 224);
-        self.dev.write_at(0, &sbuf).await?;
+    async fn invalidate_quota_counts(&mut self, sector: &mut [u8]) -> Result<()> {
+        let qflags = be16(sector, QFLAGS_OFFSET) & !quota::ALL_CHKD;
+        put16(sector, QFLAGS_OFFSET, qflags);
+        crc::stamp(sector, 224);
+        self.dev.write_at(0, sector).await?;
         self.dev.flush().await?;
         self.sb.qflags = qflags;
         Ok(())
@@ -601,7 +619,13 @@ impl<D: BlockDevice> Volume<D> {
     /// writer is poisoned.
     async fn commit_raw(&mut self, ino: u64, raw: &mut Raw) -> Result<()> {
         match self.write_raw(ino, raw).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // A pending directory (chmod, chown) keeps what is on disk.
+                if let Some(d) = self.w.as_mut().and_then(|w| w.dirs.get_mut(&ino)).and_then(|d| d.disk.as_mut()) {
+                    d.raw.clone_from(&raw.0);
+                }
+                Ok(())
+            }
             Err(e) => Err(self.poison(e)),
         }
     }
@@ -783,7 +807,7 @@ impl<D: BlockDevice> Volume<D> {
                     names.insert(e.name, (e.ino, e.ftype.code()));
                 }
             }
-            self.w().dirs.insert(dino, DirState { parent, names });
+            self.w().dirs.insert(dino, DirState { parent, names, disk: None });
         }
         Ok(self.w().dirs.get_mut(&dino).unwrap())
     }
@@ -795,14 +819,20 @@ impl<D: BlockDevice> Volume<D> {
     /// 6dd91ec6c081). A failure before that gives back what it took and
     /// leaves the directory as it was, on disk and in memory, so the flush
     /// can be run again.
-    async fn write_dir(&mut self, dino: u64, st: &DirState) -> Result<()> {
-        let inode = self.inode(dino).await?;
-        if !inode.is_dir() {
-            return Err(corrupt(format!("inode {dino}: not a directory")));
+    async fn write_dir(&mut self, dino: u64, st: &mut DirState) -> Result<()> {
+        if st.disk.is_none() {
+            let inode = self.inode(dino).await?;
+            if !inode.is_dir() {
+                return Err(corrupt(format!("inode {dino}: not a directory")));
+            }
+            let map = self.fork_map(&inode, false).await?;
+            let raw = self.read_raw(dino).await?;
+            st.disk = Some(DiskDir { raw: raw.0, map });
         }
-        let old = self.fork_map(&inode, false).await?;
+        let disk = st.disk.as_ref().expect("read above");
+        let old = disk.map.clone();
+        let mut raw = Raw(disk.raw.clone());
         let freed = old.0.iter().map(|e| e.count).sum::<u64>() + old.1.len() as u64;
-        let mut raw = self.read_raw(dino).await?;
         let fork_size = raw.data_fork_size();
         let names: Vec<DirEnt> =
             st.names.iter().map(|(n, &(ino, ftype))| DirEnt { name: n.clone(), ino, ftype }).collect();
@@ -997,7 +1027,7 @@ impl<D: BlockDevice> Volume<D> {
         raw.set_data_fork(Format::Local, &fork);
         raw.set_size(fork.len() as u64);
         self.commit_raw(ino, &mut raw).await?;
-        self.w().dirs.insert(ino, DirState { parent: dino, names: BTreeMap::new() });
+        self.w().dirs.insert(ino, DirState { parent: dino, names: BTreeMap::new(), disk: None });
         self.add_name(dino, name, ino, FileType::Directory).await?;
         Ok(ino)
     }
@@ -1262,8 +1292,8 @@ impl<D: BlockDevice> Volume<D> {
         }
         let pending: Vec<u64> = self.w().dirs.keys().copied().collect();
         for dino in pending {
-            let st = self.w().dirs.remove(&dino).expect("pending directory");
-            if let Err(e) = self.write_dir(dino, &st).await {
+            let mut st = self.w().dirs.remove(&dino).expect("pending directory");
+            if let Err(e) = self.write_dir(dino, &mut st).await {
                 self.w().dirs.insert(dino, st);
                 return Err(e);
             }
@@ -1294,12 +1324,13 @@ impl<D: BlockDevice> Volume<D> {
             ifree += free;
             fdblocks += Ag::agf_free_blocks(&headers.0);
         }
-        let mut sbuf = read_aligned(&self.dev, self.sb.block_size as u64, 0, self.sb.sect()).await?;
+        let mut sbuf = self.w().sb_sector.clone();
         put64(&mut sbuf, 128, icount);
         put64(&mut sbuf, 136, ifree);
         put64(&mut sbuf, 144, fdblocks);
         crc::stamp(&mut sbuf, 224);
         self.dev.write_at(0, &sbuf).await?;
+        self.w().sb_sector = sbuf;
         self.dev.flush().await?;
         self.sb.icount = icount;
         self.sb.ifree = ifree;

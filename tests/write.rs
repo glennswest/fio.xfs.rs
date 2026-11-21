@@ -518,7 +518,8 @@ async fn first_change_invalidates_quota_counts() {
 /// volume is open, reads are whole filesystem blocks at block boundaries;
 /// writes are whole blocks, or a sector for the superblock and AG headers
 /// (review finding 1fed3c80f651) — and whose writes can be made to fail from
-/// the `n`th on.
+/// the `n`th on: refused outright, or (`land`) written and then reported
+/// failed, as a device can that loses its acknowledgement.
 struct Strict {
     inner: fio_xfs::MemDevice,
     block: u64,
@@ -526,6 +527,7 @@ struct Strict {
     strict: AtomicBool,
     writes: AtomicU64,
     fail_from: AtomicU64,
+    land: AtomicBool,
 }
 
 impl Strict {
@@ -539,6 +541,7 @@ impl Strict {
             strict: AtomicBool::new(false),
             writes: AtomicU64::new(0),
             fail_from: AtomicU64::new(u64::MAX),
+            land: AtomicBool::new(false),
         }
     }
 
@@ -579,6 +582,9 @@ impl BlockDevice for Strict {
             "write of {len} bytes at {offset}: neither whole blocks nor a sector"
         );
         if self.writes.fetch_add(1, SeqCst) >= self.fail_from.load(SeqCst) {
+            if self.land.load(SeqCst) {
+                self.inner.write_at(offset, buf).await?;
+            }
             return Err(std::io::Error::other("injected write failure").into());
         }
         self.inner.write_at(offset, buf).await
@@ -641,8 +647,9 @@ async fn staged(base: &[u8]) -> (Volume<Strict>, Tree) {
 /// 6dd91ec6c081: a flush whose writes fail part-way — in a directory's new
 /// blocks, its inode, an AG's trees or headers, the superblock — returns
 /// the error, keeps what it did not finish, and a second flush writes it
-/// all: `xfs_repair -n` finds nothing and every name and byte reads back.
-/// Every read the writer makes goes through the contract-checking device.
+/// all: `xfs_repair -n` finds nothing and every name and byte reads back —
+/// whether the failed writes reached the device or not. Every read the
+/// writer makes goes through the contract-checking device.
 #[tokio::test]
 async fn failed_flush_can_be_retried() {
     if skip() {
@@ -658,8 +665,9 @@ async fn failed_flush_can_be_retried() {
     points.sort();
     points.dedup();
 
-    for n in points {
+    for (n, land) in points.into_iter().flat_map(|n| [(n, false), (n, true)]) {
         let (mut vol, tree) = staged(&base).await;
+        vol.device().land.store(land, SeqCst);
         vol.device().fail_after(n);
         let err = vol.flush().await.expect_err("a flush whose writes fail");
         assert!(matches!(err, Error::Io(_)), "write {n} of {total}: {err}");
@@ -667,7 +675,7 @@ async fn failed_flush_can_be_retried() {
         vol.flush().await.unwrap_or_else(|e| panic!("retry after write {n} of {total} failed: {e}"));
         vol.flush().await.unwrap();
         std::fs::write(&img.path, vol.into_device().inner.into_inner()).unwrap();
-        repair_clean(&img, &format!("after write {n} of {total} failed and the flush was retried"));
+        repair_clean(&img, &format!("after write {n} of {total} failed (landed: {land}) and the flush was retried"));
         verify(&img, &tree).await;
     }
 
