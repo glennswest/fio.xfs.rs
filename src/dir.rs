@@ -307,12 +307,14 @@ mod tests {
             for tail in (8..=64).step_by(8) {
                 let mut b = data_block(v5, 4096, tail);
                 let p = 4096 - tail;
-                b[p + 8] = 1; // namelen
-                b[p + 9] = b'a';
-                let len = (8 + 1 + 1 + s.has_ftype() as usize + 2 + 7) & !7;
-                if v5 {
-                    b[p + 10] = 1; // regular file
+                // namelen 1, name "a", ftype "regular file": as much of it
+                // as fits in the tail.
+                for (i, v) in [1u8, b'a', 1].into_iter().enumerate().take(if v5 { 3 } else { 2 }) {
+                    if p + 8 + i < b.len() {
+                        b[p + 8 + i] = v;
+                    }
                 }
+                let len = (8 + 1 + 1 + s.has_ftype() as usize + 2 + 7) & !7;
                 if len == tail {
                     put16(&mut b, p + len - 2, p as u16);
                     let out = parse(&s, b).unwrap().unwrap();
