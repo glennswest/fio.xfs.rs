@@ -81,6 +81,11 @@ its CLAUDE.md).
       clippy lints fixed on the way). A write that fails part-way through a
       flush can be retried from nine points, whether the failed write was
       refused or landed, and `xfs_repair -n` is clean afterwards.
+- [ ] Issue #27 (P1, 2026-11-21) — review finding 15cd3aece9ef in
+      `src/dir.rs`: a live entry in a data block's last 8 bytes indexed past
+      the block reading its name length (panic, not `Corrupt`). The entry
+      header must fit first, and a free record must stay within the names;
+      unit tests on hand-made blocks.
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC

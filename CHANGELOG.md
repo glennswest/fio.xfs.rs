@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-21 (#27)
+- **fix:** (review finding 15cd3aece9ef) a directory data block whose last 8 bytes began a live entry panicked (index out of bounds reading the name length) instead of returning `Error::Corrupt`, so a crafted image could kill `read_dir` or `walk`. The entry's fixed header must fit before its name length is read, and a free record that runs past the names' end is `Corrupt` too. Unit tests in `src/dir.rs`: the issue's 512-byte v4 example, every short tail in v4 and v5 blocks, an over-long free record
+
 ## [v0.4.3] — 2026-11-21
 
 ### Fixed

@@ -176,17 +176,25 @@ pub fn parse_data_block(
     let ftype = sb.has_ftype() as usize;
     let mut p = hdr;
     while p < end {
+        // Every record is a multiple of 8 bytes at an 8-byte offset, so a
+        // record that starts before `end` has at least its first 8 bytes.
         if p + 8 > end {
             return Err(corrupt(format!("directory {dir_ino}: entry runs off the block")));
         }
         if be16(buf, p) == 0xffff {
             // Free space: tag, length, ... length again at the end.
             let len = be16(buf, p + 2) as usize;
-            if len < 8 || len % 8 != 0 {
-                return Err(corrupt(format!("directory {dir_ino}: free space of {len} bytes")));
+            if len < 8 || len % 8 != 0 || p + len > end {
+                return Err(corrupt(format!("directory {dir_ino}: free space of {len} bytes at {p}")));
             }
             p += len;
             continue;
+        }
+        // A live entry: inode (8), name length (1), name, ftype, tag (2),
+        // rounded up to 8 — at least 16 bytes. Its fixed header must fit
+        // before the name length is read (finding 15cd3aece9ef).
+        if p + 9 > end {
+            return Err(corrupt(format!("directory {dir_ino}: entry runs off the block")));
         }
         let ino = be64(buf, p);
         let namelen = buf[p + 8] as usize;
@@ -200,4 +208,137 @@ pub fn parse_data_block(
         p += len;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytes::{put16, put32, put64};
+    use crate::error::Error;
+
+    /// A v4 superblock (4 KiB blocks, no ftype, no CRC) or a v5 one (ftype).
+    fn sb(v5: bool) -> Superblock {
+        let mut b = vec![0u8; 512];
+        put32(&mut b, 0, 0x5846_5342);
+        put32(&mut b, 4, 4096);
+        put64(&mut b, 8, 4 << 16);
+        put64(&mut b, 56, 128);
+        put32(&mut b, 84, 1 << 16);
+        put32(&mut b, 88, 4);
+        put16(&mut b, 102, 512);
+        put16(&mut b, 104, 512);
+        put16(&mut b, 106, 8);
+        b[120] = 12;
+        b[121] = 9;
+        b[122] = 9;
+        b[123] = 3;
+        b[124] = 16;
+        if v5 {
+            put16(&mut b, 100, 0xb4a5);
+            put32(&mut b, 216, crate::sb::incompat::FTYPE);
+            crc::stamp(&mut b, 224);
+        } else {
+            put16(&mut b, 100, 0x2004 | 0x0400); // DIRV2 | LOGV2
+        }
+        Superblock::parse(&b).unwrap()
+    }
+
+    const DIR: u64 = 128;
+
+    /// A data-form block of `size` bytes: header, then a free record from the
+    /// header to `tail`, then `fill` (8 bytes of non-free entry start)
+    /// repeated to the end.
+    fn data_block(v5: bool, size: usize, tail: usize) -> Vec<u8> {
+        let hdr = if v5 { 64 } else { 16 };
+        let mut b = vec![0u8; size];
+        put32(&mut b, 0, if v5 { XDD3 } else { XD2D });
+        if v5 {
+            put64(&mut b, 40, DIR);
+        }
+        let free = size - tail - hdr;
+        put16(&mut b, hdr, 0xffff);
+        put16(&mut b, hdr + 2, free as u16);
+        put16(&mut b, hdr + free - 2, hdr as u16);
+        // A plausible inode number where the next entry would start.
+        put64(&mut b, hdr + free, 1 << 40);
+        b
+    }
+
+    fn parse(sb: &Superblock, mut b: Vec<u8>) -> std::thread::Result<Result<Vec<RawEntry>>> {
+        if sb.is_v5() {
+            crc::stamp(&mut b, 4);
+        }
+        std::panic::catch_unwind(move || {
+            let mut out = Vec::new();
+            parse_data_block(sb, &b, DIR, &mut out).map(|()| out)
+        })
+    }
+
+    fn assert_corrupt(r: std::thread::Result<Result<Vec<RawEntry>>>, what: &str) {
+        match r {
+            Ok(Err(Error::Corrupt(_))) => {}
+            Ok(other) => panic!("{what}: {other:?}"),
+            Err(_) => panic!("{what}: panicked"),
+        }
+    }
+
+    /// Finding 15cd3aece9ef: a live entry starting in the block's last 8
+    /// bytes (the issue's 512-byte v4 example: free record at 16 of 488,
+    /// leaving p = 504) is corrupt, not an index out of bounds.
+    #[test]
+    fn an_eight_byte_tail_is_corrupt_not_a_panic() {
+        let v4 = sb(false);
+        assert_corrupt(parse(&v4, data_block(false, 512, 8)), "v4 512-byte block");
+        for v5 in [false, true] {
+            let s = sb(v5);
+            for size in [512usize, 4096] {
+                assert_corrupt(parse(&s, data_block(v5, size, 8)), &format!("v5={v5} size={size}"));
+            }
+        }
+    }
+
+    /// Every tail length a live entry could start at: too short for its
+    /// aligned length is corrupt, never a panic; a well-formed entry that
+    /// fits is read.
+    #[test]
+    fn every_short_tail_is_handled() {
+        for v5 in [false, true] {
+            let s = sb(v5);
+            for tail in (8..=64).step_by(8) {
+                let mut b = data_block(v5, 4096, tail);
+                let p = 4096 - tail;
+                b[p + 8] = 1; // namelen
+                b[p + 9] = b'a';
+                let len = (8 + 1 + 1 + s.has_ftype() as usize + 2 + 7) & !7;
+                if v5 {
+                    b[p + 10] = 1; // regular file
+                }
+                if len == tail {
+                    put16(&mut b, p + len - 2, p as u16);
+                    let out = parse(&s, b).unwrap().unwrap();
+                    assert_eq!(out.len(), 1);
+                    assert_eq!(out[0].name, b"a");
+                } else if len > tail {
+                    assert_corrupt(parse(&s, b), &format!("v5={v5} tail={tail}"));
+                } else {
+                    // The entry fits with room to spare; what follows it is
+                    // zeroes (an inode-0 entry with an empty name): corrupt.
+                    assert_corrupt(parse(&s, b), &format!("v5={v5} tail={tail} trailing"));
+                }
+            }
+        }
+    }
+
+    /// A free record longer than what is left of the block is corrupt, not
+    /// skipped past the end.
+    #[test]
+    fn a_free_record_past_the_end_is_corrupt() {
+        for v5 in [false, true] {
+            let s = sb(v5);
+            let hdr = if v5 { 64 } else { 16 };
+            let mut b = data_block(v5, 512, 8);
+            put16(&mut b, hdr + 2, (512 - hdr + 8) as u16);
+            assert_corrupt(parse(&s, b), &format!("v5={v5}"));
+        }
+    }
 }
