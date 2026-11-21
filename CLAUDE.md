@@ -4,7 +4,7 @@ Userspace file I/O into XFS. Follow fio.ext4.rs's structure and rules (read
 its CLAUDE.md).
 
 - **Crate:** `fio-xfs` (lib `fio_xfs`), binary `fio-xfs`
-- **Version:** 0.4.1 — `Cargo.toml` and `VERSION` must match
+- **Version:** 0.4.2 — `Cargo.toml` and `VERSION` must match
 - **Ships:** as a library by git tag (plus the `fio-xfs` CLI behind the
   default `cli` feature); no service, config or ports, and no golden —
   stormcentral does not list it as a component
@@ -54,14 +54,16 @@ its CLAUDE.md).
       refused by `walk`, path components checked and `O_EXCL` in `extract`;
       `tests/hostile_names.rs`. Verified: sc-build of 89b242e, all suites.
       Other open findings (majors) follow as P1.
-- [ ] Issue #25 (P1, 2026-11-20) — review findings in `src/sb.rs`:
+- [x] Issue #25 (P1, 2026-11-20, v0.4.2) — review findings in `src/sb.rs`:
       63188b025c7e (log fields shifted before their bounds were checked:
-      a crafted superblock panics) and 01a341965933 (writing a
-      quota-accounted image left the quota counts marked checked). Plan:
-      bound every log field before any shift; parse `sb_qflags` and clear
-      the quota-CHKD flags in the primary superblock, durably, before the
-      first write, so the next quota mount recounts. Tests: sb unit tests,
-      tests/write.rs, and a kernel quota recount in tests/kernel.rs.
+      a crafted superblock panicked) and 01a341965933 (writing a
+      quota-accounted image left the quota counts marked checked). Every
+      log field is bounded before any shift (`Corrupt`); `sb_qflags` is
+      parsed and the writer's first change clears the quota CHKD flags in
+      the primary superblock (flushed first), as xfs_repair does, so the
+      kernel recounts. Verified: sc-build of b3aa485 (all suites, 0
+      warnings); the kernel test's recount matches `stat`, and a control
+      with the flags put back keeps the stale count.
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC
