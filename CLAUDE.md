@@ -4,7 +4,7 @@ Userspace file I/O into XFS. Follow fio.ext4.rs's structure and rules (read
 its CLAUDE.md).
 
 - **Crate:** `fio-xfs` (lib `fio_xfs`), binary `fio-xfs`
-- **Version:** 0.4.4 — `Cargo.toml` and `VERSION` must match
+- **Version:** 0.4.5 — `Cargo.toml` and `VERSION` must match
 - **Ships:** as a library by git tag (plus the `fio-xfs` CLI behind the
   default `cli` feature); no service, config or ports, and no golden —
   stormcentral does not list it as a component
@@ -88,12 +88,14 @@ its CLAUDE.md).
       unit tests on hand-made blocks. Verified: sc-build of 35eb7d5 (build,
       all suites incl. the kernel test, `clippy --all-targets -D warnings`
       clean).
-- [ ] Issue #29 (minor, 2026-11-21) — three review findings:
+- [x] Issue #29 (minor, 2026-11-21, v0.4.5) — three review findings:
       287cd742841f (`export`: hard-linked FIFOs/devices/sockets were put
       in the hard-link map before being skipped), 97a24c584823 (`sb`: log
       fields held to their geometry; the shift part was #25's),
       b8ffbc6331af (`write::alloc_ino`: the inode limit stopped the search
       before other AGs' free inodes). Tests in `tests/write.rs` and `sb`.
+      Verified: sc-build of 7071d8f (build, all suites incl. the kernel
+      test, `clippy --all-targets -D warnings` clean).
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC
