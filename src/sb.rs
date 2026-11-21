@@ -247,7 +247,10 @@ impl Superblock {
 
         // Every log field is bounded before anything is shifted by it: an
         // image is untrusted, and a shift past the integer's width panics
-        // (review finding 63188b025c7e).
+        // (review finding 63188b025c7e). Each is then held to the field it
+        // is the logarithm of, as the kernel's `xfs_validate_sb_common`
+        // does, so none survives with a value later address arithmetic
+        // would trust (97a24c584823).
         let bs = sb.block_size;
         if !(512..=65536).contains(&bs)
             || !bs.is_power_of_two()
@@ -262,10 +265,13 @@ impl Superblock {
             || sb.ag_count == 0
             || sb.ag_blocks == 0
             || sb.agblk_log > 31
-            || (sb.ag_blocks as u64) > 1u64 << sb.agblk_log
+            // The AG log is the AG size rounded up to a power of two.
+            || sb.agblk_log as u32 != 32 - (sb.ag_blocks - 1).leading_zeros()
+            // An AG inode number is 32 bits.
+            || sb.agblk_log as u32 + sb.inopb_log as u32 > 32
             // A directory block is at most 64 KiB, so at most 2^7 blocks.
             || sb.dirblk_log > 7
-            || (bs as u64) << sb.dirblk_log > 65536
+            || bs.checked_shl(sb.dirblk_log as u32).map_or(true, |d| d > 65536)
         {
             return Err(Error::Corrupt("superblock geometry".into()));
         }
@@ -507,14 +513,60 @@ mod tests {
                     let r = r.unwrap_or_else(|_| panic!("offset {off} = {v} (v{version}) panicked"));
                     match r {
                         Err(Error::Corrupt(_)) => {}
-                        // A larger directory block (offset 192, 1..=4) or AG
-                        // log (offset 124, 17..=31) is a valid geometry.
-                        Ok(_) if (off == 192 && v <= 4) || (off == 124 && (17..=31).contains(&v)) => {}
+                        // A larger directory block (offset 192, 1..=4) is a
+                        // valid geometry; any other AG log (offset 124) is
+                        // not the AG size's (97a24c584823).
+                        Ok(_) if off == 192 && v <= 4 => {}
                         other => panic!("offset {off} = {v} (v{version}): {other:?}"),
                     }
                 }
             }
         }
+    }
+
+    /// Finding 97a24c584823: a v4 superblock whose block log is 44 (a shift
+    /// that wraps to 12 unchecked) is refused, and the AG log must be the
+    /// AG size's, rounded up, with room for the inode bits.
+    #[test]
+    fn log_fields_must_match_their_geometry() {
+        let mut b = good();
+        put16(&mut b, 100, 0x2004 | 0x0400);
+        put32(&mut b, 216, 0);
+        b[120] = 44;
+        assert!(matches!(parse(b), Err(Error::Corrupt(_))));
+        // A short AG: 40000 blocks still takes a log of 16.
+        let mut b = good();
+        put32(&mut b, 84, 40000);
+        put64(&mut b, 8, 4 * 40000);
+        assert_eq!(parse(b).unwrap().agblk_log, 16);
+        // 2^31 blocks of 512 bytes, 256-byte inodes: 31 + 1 bits is the most.
+        let geometry = |inode_size: u16, inopb_log: u8| {
+            let mut b = good();
+            put32(&mut b, 4, 512);
+            b[120] = 9;
+            put32(&mut b, 84, 1 << 31);
+            put32(&mut b, 88, 1);
+            put64(&mut b, 8, 1 << 31);
+            put16(&mut b, 104, inode_size);
+            put16(&mut b, 106, 512 / inode_size);
+            b[123] = inopb_log;
+            b[124] = 31;
+            parse(b)
+        };
+        assert_eq!(geometry(256, 1).unwrap().agino_log(), 32);
+        assert!(matches!(geometry(512, 0), Ok(_)));
+        // The same with a block of 1024 bytes: four inodes, 33 bits.
+        let mut b = good();
+        put32(&mut b, 4, 1024);
+        b[120] = 10;
+        put32(&mut b, 84, 1 << 31);
+        put32(&mut b, 88, 1);
+        put64(&mut b, 8, 1 << 31);
+        put16(&mut b, 104, 256);
+        put16(&mut b, 106, 4);
+        b[123] = 2;
+        b[124] = 31;
+        assert!(matches!(parse(b), Err(Error::Corrupt(_))));
     }
 
     #[test]
