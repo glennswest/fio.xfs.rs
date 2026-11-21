@@ -3,6 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v0.4.3] — 2026-11-21
+
+### Fixed
+- (security, #26; finding 0f02ac950500) Changing the permission bits of a file with an access ACL (`chmod`, `write_with` on an existing file) is `Error::Unsupported`, not a mode the ACL silently overrides
+- (#26; finding 1fed3c80f651) Every writer read after open is whole blocks at a block boundary, as the `BlockDevice` contract says
+- (#26; findings 793cd4f33612, a72ebcf6af32, 03ce0a0cf15e) A flush that fails part-way can be retried: pending directories and AG state are kept until they are durable, and a failure that cannot be undone poisons the writer (`Error::Corrupt`)
+- (#26; finding 6dd91ec6c081) Rewriting a directory allocates and writes the new blocks before freeing the old ones
+- (#26; finding 8b48ae8c1697) Paths and symlink targets with an embedded NUL are `Error::InvalidPath`
+
 ### 2026-11-21 (#32)
 - **chore:** `cargo clippy --all-targets -D warnings` clean again: two `needless_late_init` lints (clippy 1.95) in `btree::build_bmbt` and `dirwrite`'s node index, rewritten as `let … = if …`; no behaviour change
 
