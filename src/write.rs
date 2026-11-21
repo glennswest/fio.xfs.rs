@@ -706,17 +706,23 @@ impl<D: BlockDevice> Volume<D> {
 
     /// A free inode, preferring AG `pref`: a free one in an existing chunk,
     /// else a new chunk, else the next AG.
+    ///
+    /// The inode-space limit (`sb_imax_pct`) only stops new chunks: as in
+    /// the kernel's `xfs_dialloc`, an AG that may not grow is still searched
+    /// for free inodes, and the search goes on to every other AG before
+    /// giving up (review finding b8ffbc6331af).
     async fn alloc_ino(&mut self, pref: u32) -> Result<u64> {
+        let may_grow = match self.inode_limit() {
+            Some(max) => self.sb.icount + (self.w().new_chunks + 1) * CHUNK_INODES as u64 <= max,
+            None => true,
+        };
         for agno in self.ag_order(pref) {
             self.load_ag(agno).await?;
             if let Some(agino) = self.ag_mut(agno).1.alloc_inode() {
                 return Ok(self.sb.agino_to_ino(agno, agino));
             }
-            if self.sb.imax_pct > 0 {
-                let max = self.sb.data_blocks * self.sb.imax_pct as u64 / 100 * self.sb.inodes_per_block as u64;
-                if self.sb.icount + (self.w().new_chunks + 1) * CHUNK_INODES as u64 > max {
-                    return Err(Error::NoSpace(format!("inodes may take {}% of the space", self.sb.imax_pct)));
-                }
+            if !may_grow {
+                continue;
             }
             let (sb, ag) = self.ag_mut(agno);
             if let Some(agbno) = ag.alloc_chunk(sb) {
@@ -730,7 +736,22 @@ impl<D: BlockDevice> Volume<D> {
                 return Ok(self.sb.agino_to_ino(agno, agino));
             }
         }
+        if !may_grow {
+            return Err(Error::NoSpace(format!("inodes may take {}% of the space", self.sb.imax_pct)));
+        }
         Err(Error::NoSpace("no room for more inodes".into()))
+    }
+
+    /// The most inodes the filesystem may hold, if `sb_imax_pct` limits it:
+    /// that share of the data blocks, in whole inode chunks, as the kernel's
+    /// `xfs_set_maxicount` reckons it.
+    fn inode_limit(&self) -> Option<u64> {
+        if self.sb.imax_pct == 0 {
+            return None;
+        }
+        let chunk_blocks = (CHUNK_INODES / self.sb.inodes_per_block as u32).max(1) as u64;
+        let blocks = self.sb.data_blocks * self.sb.imax_pct as u64 / 100 / chunk_blocks * chunk_blocks;
+        Some(blocks * self.sb.inodes_per_block as u64)
     }
 
     /// Give back an inode allocated but never written.
