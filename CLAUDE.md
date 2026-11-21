@@ -64,6 +64,18 @@ its CLAUDE.md).
       kernel recounts. Verified: sc-build of b3aa485 (all suites, 0
       warnings); the kernel test's recount matches `stat`, and a control
       with the flags put back keeps the stale count.
+- [ ] Issue #26 (P1, 2026-11-20) — review findings in `src/write.rs`:
+      0f02ac950500 (chmod with an access ACL), 1fed3c80f651 (writer reads not
+      block-aligned), 793cd4f33612 / a72ebcf6af32 / 03ce0a0cf15e (a failed
+      flush drops pending state; a retry falsely succeeds), 8b48ae8c1697
+      (embedded NULs in names and symlink targets), 6dd91ec6c081 (write_dir
+      frees its fork before the new one is allocated). Plan: aligned read
+      helper; one name check; refuse a mode change on an inode with an access
+      ACL (until xattr writing); write_dir allocates and writes the new fork,
+      then the inode, then frees the old, rolling back on error; flush keeps
+      each directory until it is written and AG dirty state until the device
+      flush succeeds, and `Ag::rebuild` restores itself on error; tests with
+      an alignment-enforcing and a failure-injecting device.
 - [ ] Issue #20 (P2) — write parent pointers (needs xattr writing)
 - [ ] Issue #17 (P2) — an external-log filesystem opens with no log check
 - [ ] Issue #16 (P3) — the dirty-log check skips the kernel's torn-write CRC
