@@ -19,6 +19,12 @@
 //! So **nothing is consistent on disk until [`Volume::flush`]** — call it
 //! before dropping the volume. Nothing here writes the log: the filesystem
 //! must have been cleanly unmounted, and stays so.
+//!
+//! On failure: a change that cannot get or write its blocks gives them back
+//! and changes nothing; a flush that fails part-way keeps what it did not
+//! finish, so it can be run again; a failure nothing can undo (an inode
+//! written outside a flush) poisons the writer, and every later change and
+//! flush fails rather than report success.
 
 use std::collections::BTreeMap;
 
@@ -27,7 +33,7 @@ use crate::bmap::{self, Extent};
 use crate::btree;
 use crate::bytes::{be16, be32, be64, put16, put32, put64};
 use crate::crc;
-use crate::device::BlockDevice;
+use crate::device::{read_aligned, BlockDevice};
 use crate::dir::{FileType, RawEntry};
 use crate::dirwrite::{self, DirEnt, Layout};
 use crate::error::{corrupt, Error, Result};
@@ -144,6 +150,10 @@ pub(crate) struct Writer {
     dirs: BTreeMap<u64, DirState>,
     rng: u64,
     new_chunks: u64,
+    /// Why the in-memory state can no longer be trusted, once a failure
+    /// could not be undone: every later change and flush is refused, so
+    /// none can report success over it.
+    poisoned: Option<String>,
 }
 
 impl Writer {
@@ -152,7 +162,7 @@ impl Writer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9e37_79b9_7f4a_7c15);
-        Writer { ags: BTreeMap::new(), dirs: BTreeMap::new(), rng: seed | 1, new_chunks: 0 }
+        Writer { ags: BTreeMap::new(), dirs: BTreeMap::new(), rng: seed | 1, new_chunks: 0, poisoned: None }
     }
 
     /// A directory's names, `.` and `..` first, when it is held in memory.
@@ -193,17 +203,39 @@ fn ts_raw(t: Timestamp, bigtime: bool) -> u64 {
     }
 }
 
-/// Split a path into its parent and last name.
+/// Whether a directory may hold `name`: 1 to 255 bytes, neither `/` nor
+/// NUL in it, and not `.` or `..` — what the read side accepts
+/// ([`crate::dir`]) and what the kernel can name.
+fn valid_name(name: &[u8]) -> bool {
+    !name.is_empty() && name.len() <= 255 && name != b"." && name != b".." && !name.iter().any(|&b| b == b'/' || b == 0)
+}
+
+/// Split a path into its parent and last name. Every operation that makes a
+/// name comes through here, so a path with a NUL anywhere in it, or a last
+/// name a directory cannot hold, is refused before anything is allocated
+/// (review finding 8b48ae8c1697).
 fn split_path(path: &str) -> Result<(&str, Vec<u8>)> {
+    if path.contains('\0') {
+        return Err(Error::InvalidPath(path.escape_debug().to_string()));
+    }
     let t = path.trim_end_matches('/');
     let (parent, name) = match t.rfind('/') {
         Some(i) => (&t[..i], &t[i + 1..]),
         None => ("", t),
     };
-    if name.is_empty() || name == "." || name == ".." || name.len() > 255 {
+    if !valid_name(name.as_bytes()) {
         return Err(Error::InvalidPath(path.into()));
     }
     Ok((if parent.is_empty() { "/" } else { parent }, name.as_bytes().to_vec()))
+}
+
+/// A file's contents, stored in new blocks: what its data fork becomes.
+struct Stored {
+    format: Format,
+    fork: Vec<u8>,
+    /// Blocks taken, B+tree blocks included.
+    blocks: u64,
+    nextents: u64,
 }
 
 /// The bytes of a raw inode, with helpers for the fields the writer sets.
@@ -305,6 +337,7 @@ impl<D: BlockDevice> Volume<D> {
     /// The writer's state, made on the first change. Every change asks for
     /// it before it touches the device.
     async fn writer(&mut self) -> Result<&mut Writer> {
+        self.check_poisoned()?;
         if self.w.is_none() {
             self.sb.check_writable()?;
             if !matches!(self.log, LogState::Clean | LogState::External) {
@@ -327,8 +360,7 @@ impl<D: BlockDevice> Volume<D> {
     /// clears them. Accounting and enforcement flags stay as they were
     /// (review finding 01a341965933).
     async fn invalidate_quota_counts(&mut self) -> Result<()> {
-        let mut sbuf = vec![0u8; self.sb.sect()];
-        self.dev.read_at(0, &mut sbuf).await?;
+        let mut sbuf = read_aligned(&self.dev, self.sb.block_size as u64, 0, self.sb.sect()).await?;
         let qflags = be16(&sbuf, QFLAGS_OFFSET) & !quota::ALL_CHKD;
         put16(&mut sbuf, QFLAGS_OFFSET, qflags);
         crc::stamp(&mut sbuf, 224);
@@ -340,6 +372,36 @@ impl<D: BlockDevice> Volume<D> {
 
     fn w(&mut self) -> &mut Writer {
         self.w.as_mut().expect("writer")
+    }
+
+    /// Refuse to go on after a failure that could not be undone.
+    fn check_poisoned(&self) -> Result<()> {
+        match self.w.as_ref().and_then(|w| w.poisoned.as_ref()) {
+            Some(why) => Err(corrupt(format!(
+                "an earlier failure left the writer's state inconsistent ({why}); reopen the volume"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Remember that the in-memory state no longer matches what was asked
+    /// for, and pass the error on.
+    fn poison(&mut self, e: Error) -> Error {
+        if let Some(w) = self.w.as_mut() {
+            w.poisoned.get_or_insert_with(|| e.to_string());
+        }
+        e
+    }
+
+    /// Give back runs of blocks allocated for something that then failed.
+    /// If even that fails, the writer is poisoned.
+    async fn unalloc_runs(&mut self, runs: &[(u64, u32)], owner: u64) {
+        for &(fsb, len) in runs {
+            if let Err(e) = self.release(fsb, len, owner).await {
+                self.poison(e);
+                return;
+            }
+        }
     }
 
     /// Make sure AG `agno` is in memory.
@@ -413,19 +475,21 @@ impl<D: BlockDevice> Volume<D> {
         ag.rmap_remove(sb, agbno, len, owner)
     }
 
-    /// Free a fork's blocks, its B+tree's included; returns how many.
-    async fn free_fork(&mut self, inode: &Inode, attr: bool) -> Result<u64> {
-        let (extents, btree_blocks) = self.fork_map(inode, attr).await?;
-        let mut n = 0;
-        for e in extents {
-            self.release(e.block, e.count as u32, inode.ino).await?;
-            n += e.count;
+    /// Give back the blocks of a fork (as [`Volume::fork_map`] found them)
+    /// once the inode no longer points at them. The inode is already on
+    /// disk without them, so a failure here poisons the writer.
+    async fn free_map(&mut self, ino: u64, map: &(Vec<Extent>, Vec<u64>)) -> Result<()> {
+        for e in &map.0 {
+            if let Err(e) = self.release(e.block, e.count as u32, ino).await {
+                return Err(self.poison(e));
+            }
         }
-        for b in btree_blocks {
-            self.release(b, 1, inode.ino).await?;
-            n += 1;
+        for &b in &map.1 {
+            if let Err(e) = self.release(b, 1, ino).await {
+                return Err(self.poison(e));
+            }
         }
-        Ok(n)
+        Ok(())
     }
 
     /// Write `data` into the blocks `extents` map, the last one zero-padded.
@@ -450,11 +514,11 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Map `extents` in a fork of `fork_size` bytes: in the inode when they
     /// fit, else under a bmap B+tree. Returns the format, the fork's bytes
-    /// and the B+tree's blocks.
-    async fn map_fork(&mut self, ino: u64, extents: &[Extent], fork_size: usize) -> Result<(Format, Vec<u8>, u64)> {
+    /// and the runs of blocks the B+tree took — none taken if it fails.
+    async fn map_fork(&mut self, ino: u64, extents: &[Extent], fork_size: usize) -> Result<(Format, Vec<u8>, Vec<(u64, u32)>)> {
         if extents.len() <= fork_size / 16 {
             let fork: Vec<u8> = extents.iter().flat_map(|e| e.encode()).collect();
-            return Ok((Format::Extents, fork, 0));
+            return Ok((Format::Extents, fork, Vec::new()));
         }
         let bs = self.sb.block_size as usize;
         let root_max = btree::bmap_root_max(fork_size);
@@ -468,12 +532,28 @@ impl<D: BlockDevice> Volume<D> {
         }
         let recs: Vec<[u8; 16]> = extents.iter().map(Extent::encode).collect();
         let offsets: Vec<u64> = extents.iter().map(|e| e.offset).collect();
-        let built = btree::build_bmap(&self.sb, ino, &recs, &offsets, &fsbs, root_max)?;
-        for (fsb, buf) in &built.blocks {
+        let built = match btree::build_bmap(&self.sb, ino, &recs, &offsets, &fsbs, root_max) {
+            Ok(built) => self.write_blocks(&built.blocks).await.map(|()| built),
+            Err(e) => Err(e),
+        };
+        match built {
+            Ok(built) => {
+                let fork = btree::bmap_root_fork(fork_size, (built.levels - 1) as u16, &built.root_entries);
+                Ok((Format::Btree, fork, runs))
+            }
+            Err(e) => {
+                self.unalloc_runs(&runs, ino).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Write whole blocks, each at its filesystem block.
+    async fn write_blocks(&self, blocks: &[(u64, Vec<u8>)]) -> Result<()> {
+        for (fsb, buf) in blocks {
             self.dev.write_at(self.sb.fsb_to_byte(*fsb)?, buf).await?;
         }
-        let fork = btree::bmap_root_fork(fork_size, (built.levels - 1) as u16, &built.root_entries);
-        Ok((Format::Btree, fork, nb as u64))
+        Ok(())
     }
 
     /// An inode's AG and the AG block it sits in: where its data should go.
@@ -482,19 +562,19 @@ impl<D: BlockDevice> Volume<D> {
         (agno, agino >> self.sb.inopb_log)
     }
 
-    /// Store a regular file's contents in new blocks. Returns the fork's
-    /// format and bytes, the blocks used and the extent count.
-    async fn store_data(&mut self, ino: u64, fork_size: usize, data: &[u8]) -> Result<(Format, Vec<u8>, u64, u64)> {
+    /// Store a regular file's contents in new blocks. Nothing is kept if it
+    /// fails.
+    async fn store_data(&mut self, ino: u64, fork_size: usize, data: &[u8]) -> Result<Stored> {
         let bs = self.sb.block_size as u64;
         let n = (data.len() as u64).div_ceil(bs);
         if n == 0 {
-            return Ok((Format::Extents, Vec::new(), 0, 0));
+            return Ok(Stored { format: Format::Extents, fork: Vec::new(), blocks: 0, nextents: 0 });
         }
         let (agno, near) = self.near(ino);
-        let runs = self.alloc_blocks(agno, n, near).await?;
+        let mut runs = self.alloc_blocks(agno, n, near).await?;
         let mut extents = Vec::with_capacity(runs.len());
         let mut lblk = 0;
-        for (fsb, len) in runs {
+        for &(fsb, len) in &runs {
             self.rmap_extent(fsb, len, ino, lblk);
             extents.push(Extent { offset: lblk, block: fsb, count: len as u64, unwritten: false });
             lblk += len as u64;
@@ -504,22 +584,35 @@ impl<D: BlockDevice> Volume<D> {
             Err(e) => Err(e),
         };
         match mapped {
-            Ok((format, fork, btree_blocks)) => Ok((format, fork, n + btree_blocks, extents.len() as u64)),
+            Ok((format, fork, tree)) => {
+                let blocks = n + tree.iter().map(|&(_, l)| l as u64).sum::<u64>();
+                runs.extend(tree);
+                Ok(Stored { format, fork, blocks, nextents: extents.len() as u64 })
+            }
             Err(e) => {
-                for x in &extents {
-                    self.release(x.block, x.count as u32, ino).await?;
-                }
+                self.unalloc_runs(&runs, ino).await;
                 Err(e)
             }
         }
     }
 
+    /// Write an inode outside a flush. A failed write leaves the inode on
+    /// disk neither old nor new, and nothing later rewrites it, so the
+    /// writer is poisoned.
+    async fn commit_raw(&mut self, ino: u64, raw: &mut Raw) -> Result<()> {
+        match self.write_raw(ino, raw).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.poison(e)),
+        }
+    }
+
     // ---- inodes --------------------------------------------------------------
 
+    /// Read an inode's bytes, through the whole block around it (review
+    /// finding 1fed3c80f651).
     async fn read_raw(&self, ino: u64) -> Result<Raw> {
         let at = self.sb.ino_to_byte(ino)?;
-        let mut buf = vec![0u8; self.sb.inode_size as usize];
-        self.dev.read_at(at, &mut buf).await?;
+        let buf = read_aligned(&self.dev, self.sb.block_size as u64, at, self.sb.inode_size as usize).await?;
         if be16(&buf, 0) != INODE_MAGIC || !crc::verify(&buf, INODE_CRC) || be64(&buf, 152) != ino {
             return Err(corrupt(format!("inode {ino}: magic, checksum or number")));
         }
@@ -531,9 +624,9 @@ impl<D: BlockDevice> Volume<D> {
         crc::stamp(&mut raw.0, INODE_CRC);
         let at = self.sb.ino_to_byte(ino)?;
         let bs = self.sb.block_size as u64;
-        let block_at = at & !(bs - 1);
-        let mut buf = vec![0u8; bs as usize];
-        self.dev.read_at(block_at, &mut buf).await?;
+        let block_at = at - at % bs;
+        let len = ((at + raw.0.len() as u64).div_ceil(bs) * bs - block_at) as usize;
+        let mut buf = read_aligned(&self.dev, bs, block_at, len).await?;
         let off = (at - block_at) as usize;
         buf[off..off + raw.0.len()].copy_from_slice(&raw.0);
         self.dev.write_at(block_at, &buf).await
@@ -605,7 +698,11 @@ impl<D: BlockDevice> Volume<D> {
             if let Some(agbno) = ag.alloc_chunk(sb) {
                 let agino = ag.alloc_inode().expect("a new chunk has free inodes");
                 self.w().new_chunks += 1;
-                self.init_chunk(agno, agbno).await?;
+                // The chunk is allocated in memory: if its inodes did not
+                // reach the disk, nothing can be trusted to undo that.
+                if let Err(e) = self.init_chunk(agno, agbno).await {
+                    return Err(self.poison(e));
+                }
                 return Ok(self.sb.agino_to_ino(agno, agino));
             }
         }
@@ -626,10 +723,10 @@ impl<D: BlockDevice> Volume<D> {
         if inode.is_realtime() {
             return Err(Error::Unsupported(format!("inode {}: data on the realtime device", inode.ino)));
         }
-        self.free_fork(inode, false).await?;
-        if inode.aformat.is_some() {
-            self.free_fork(inode, true).await?;
-        }
+        // What it holds is read first and given back only once the inode on
+        // disk is free.
+        let data = self.fork_map(inode, false).await?;
+        let attr = self.fork_map(inode, true).await?;
         let mut raw = self.read_raw(inode.ino).await?;
         let gen = be32(&raw.0, 92).wrapping_add(1);
         let mut r = vec![0u8; raw.0.len()];
@@ -643,10 +740,15 @@ impl<D: BlockDevice> Volume<D> {
         put64(&mut r, 152, inode.ino);
         r[160..176].copy_from_slice(&self.sb.meta_uuid);
         raw.0 = r;
-        self.write_raw(inode.ino, &mut raw).await?;
+        self.commit_raw(inode.ino, &mut raw).await?;
+        self.free_map(inode.ino, &data).await?;
+        self.free_map(inode.ino, &attr).await?;
         let (agno, agino) = self.sb.ino_to_agino(inode.ino);
-        self.load_ag(agno).await?;
-        self.ag_mut(agno).1.free_inode(agino)
+        let freed = match self.load_ag(agno).await {
+            Ok(()) => self.ag_mut(agno).1.free_inode(agino),
+            Err(e) => Err(e),
+        };
+        freed.map_err(|e| self.poison(e))
     }
 
     // ---- directories ---------------------------------------------------------
@@ -687,70 +789,105 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// Lay a directory out from its names and write it.
+    ///
+    /// The new layout goes into new blocks, then the inode is pointed at
+    /// it, and only then are the old blocks given back (review finding
+    /// 6dd91ec6c081). A failure before that gives back what it took and
+    /// leaves the directory as it was, on disk and in memory, so the flush
+    /// can be run again.
     async fn write_dir(&mut self, dino: u64, st: &DirState) -> Result<()> {
         let inode = self.inode(dino).await?;
         if !inode.is_dir() {
             return Err(corrupt(format!("inode {dino}: not a directory")));
         }
-        let freed = self.free_fork(&inode, false).await?;
+        let old = self.fork_map(&inode, false).await?;
+        let freed = old.0.iter().map(|e| e.count).sum::<u64>() + old.1.len() as u64;
         let mut raw = self.read_raw(dino).await?;
         let fork_size = raw.data_fork_size();
         let names: Vec<DirEnt> =
             st.names.iter().map(|(n, &(ino, ftype))| DirEnt { name: n.clone(), ino, ftype }).collect();
         let subdirs = names.iter().filter(|e| e.ftype == FileType::Directory.code()).count() as u32;
-        let (format, fork, size, used, nextents) = match dirwrite::layout(&self.sb, dino, st.parent, &names, fork_size) {
+        let mut taken = Vec::new();
+        let laid = match dirwrite::layout(&self.sb, dino, st.parent, &names, fork_size) {
             Layout::Short(bytes) => {
                 let n = bytes.len() as u64;
-                (Format::Local, bytes, n, 0, 0)
+                Ok((Format::Local, bytes, n, 0, 0))
             }
-            Layout::Blocks { size, blocks } => {
-                let per = 1u64 << self.sb.dirblk_log;
-                // Runs of consecutive logical blocks.
-                let mut runs: Vec<(u64, u64)> = Vec::new();
-                for b in &blocks {
-                    match runs.last_mut() {
-                        Some((s, n)) if *s + *n == b.lblk => *n += per,
-                        _ => runs.push((b.lblk, per)),
-                    }
-                }
-                let (agno, near) = self.near(dino);
-                let mut extents = Vec::new();
-                let mut used = 0;
-                for (lstart, n) in runs {
-                    let mut l = lstart;
-                    for (fsb, len) in self.alloc_blocks(agno, n, near).await? {
-                        self.rmap_extent(fsb, len, dino, l);
-                        extents.push(Extent { offset: l, block: fsb, count: len as u64, unwritten: false });
-                        l += len as u64;
-                    }
-                    used += n;
-                }
-                let bs = self.sb.block_size as usize;
-                for mut b in blocks {
-                    let fsb_of = |lblk: u64| -> Result<u64> {
-                        let e = bmap::find(&extents, lblk).ok_or_else(|| corrupt("directory block unmapped"))?;
-                        Ok(e.block + (lblk - e.offset))
-                    };
-                    let first = fsb_of(b.lblk)?;
-                    put64(&mut b.data, b.blkno_off, self.sb.fsb_to_byte(first)? >> 9);
-                    crc::stamp(&mut b.data, b.crc_off);
-                    for k in 0..per {
-                        let at = self.sb.fsb_to_byte(fsb_of(b.lblk + k)?)?;
-                        self.dev.write_at(at, &b.data[k as usize * bs..(k as usize + 1) * bs]).await?;
-                    }
-                }
-                let (format, fork, btree_blocks) = self.map_fork(dino, &extents, fork_size).await?;
-                (format, fork, size, used + btree_blocks, extents.len() as u64)
-            }
+            Layout::Blocks { size, blocks } => self.write_dir_blocks(dino, size, blocks, fork_size, &mut taken).await,
         };
-        raw.set_data_fork(format, &fork);
-        raw.set_size(size);
-        raw.set_nextents(nextents);
-        raw.set_nblocks(raw.nblocks().saturating_sub(freed) + used);
-        raw.set_nlink(2 + subdirs);
-        let now = self.now();
-        raw.touch(now, true);
-        self.write_raw(dino, &mut raw).await
+        let written = match laid {
+            Ok((format, fork, size, used, nextents)) => {
+                raw.set_data_fork(format, &fork);
+                raw.set_size(size);
+                raw.set_nextents(nextents);
+                raw.set_nblocks(raw.nblocks().saturating_sub(freed) + used);
+                raw.set_nlink(2 + subdirs);
+                let now = self.now();
+                raw.touch(now, true);
+                // The directory stays pending until this succeeds, and the
+                // next flush writes the whole inode again.
+                self.write_raw(dino, &mut raw).await
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = written {
+            self.unalloc_runs(&taken, dino).await;
+            return Err(e);
+        }
+        self.free_map(dino, &old).await
+    }
+
+    /// A block-form directory's blocks, written to new space; every run
+    /// taken is pushed on `taken`. Returns the fork's format and bytes, the
+    /// size, the blocks used and the extent count.
+    async fn write_dir_blocks(
+        &mut self,
+        dino: u64,
+        size: u64,
+        blocks: Vec<dirwrite::DirBlock>,
+        fork_size: usize,
+        taken: &mut Vec<(u64, u32)>,
+    ) -> Result<(Format, Vec<u8>, u64, u64, u64)> {
+        let per = 1u64 << self.sb.dirblk_log;
+        // Runs of consecutive logical blocks.
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for b in &blocks {
+            match runs.last_mut() {
+                Some((s, n)) if *s + *n == b.lblk => *n += per,
+                _ => runs.push((b.lblk, per)),
+            }
+        }
+        let (agno, near) = self.near(dino);
+        let mut extents = Vec::new();
+        let mut used = 0;
+        for (lstart, n) in runs {
+            let mut l = lstart;
+            for (fsb, len) in self.alloc_blocks(agno, n, near).await? {
+                taken.push((fsb, len));
+                self.rmap_extent(fsb, len, dino, l);
+                extents.push(Extent { offset: l, block: fsb, count: len as u64, unwritten: false });
+                l += len as u64;
+            }
+            used += n;
+        }
+        let bs = self.sb.block_size as usize;
+        for mut b in blocks {
+            let fsb_of = |lblk: u64| -> Result<u64> {
+                let e = bmap::find(&extents, lblk).ok_or_else(|| corrupt("directory block unmapped"))?;
+                Ok(e.block + (lblk - e.offset))
+            };
+            let first = fsb_of(b.lblk)?;
+            put64(&mut b.data, b.blkno_off, self.sb.fsb_to_byte(first)? >> 9);
+            crc::stamp(&mut b.data, b.crc_off);
+            for k in 0..per {
+                let at = self.sb.fsb_to_byte(fsb_of(b.lblk + k)?)?;
+                self.dev.write_at(at, &b.data[k as usize * bs..(k as usize + 1) * bs]).await?;
+            }
+        }
+        let (format, fork, tree) = self.map_fork(dino, &extents, fork_size).await?;
+        let tree_blocks: u64 = tree.iter().map(|&(_, l)| l as u64).sum();
+        taken.extend(tree);
+        Ok((format, fork, size, used + tree_blocks, extents.len() as u64))
     }
 
     // ---- making things -------------------------------------------------------
@@ -799,21 +936,27 @@ impl<D: BlockDevice> Volume<D> {
                 if inode.is_realtime() {
                     return Err(Error::Unsupported(format!("{path}: data on the realtime device")));
                 }
+                if let Some(a) = attrs {
+                    self.check_mode_change(&inode, a.perms(), path).await?;
+                }
+                let old = self.fork_map(&inode, false).await?;
+                let freed = old.0.iter().map(|e| e.count).sum::<u64>() + old.1.len() as u64;
                 let mut raw = self.read_raw(ino).await?;
                 // The new contents first: if there is no room, the old stay.
-                let (format, fork, used, nextents) = self.store_data(ino, raw.data_fork_size(), data).await?;
-                let freed = self.free_fork(&inode, false).await?;
-                raw.set_data_fork(format, &fork);
+                // The old blocks go back once the inode no longer maps them.
+                let st = self.store_data(ino, raw.data_fork_size(), data).await?;
+                raw.set_data_fork(st.format, &st.fork);
                 raw.set_size(data.len() as u64);
-                raw.set_nextents(nextents);
-                raw.set_nblocks(raw.nblocks().saturating_sub(freed) + used);
+                raw.set_nextents(st.nextents);
+                raw.set_nblocks(raw.nblocks().saturating_sub(freed) + st.blocks);
                 if let Some(a) = attrs {
                     raw.set_mode(mode::IFREG | a.perms());
                     raw.set_owner(a.uid, a.gid);
                 }
                 let now = self.now();
                 raw.touch(now, true);
-                self.write_raw(ino, &mut raw).await?;
+                self.commit_raw(ino, &mut raw).await?;
+                self.free_map(ino, &old).await?;
                 Ok(ino)
             }
             Some((_, FileType::Directory)) => Err(Error::IsADirectory(path.into())),
@@ -821,18 +964,18 @@ impl<D: BlockDevice> Volume<D> {
             None => {
                 let a = attrs.copied().unwrap_or_default();
                 let (dino, name, ino, mut raw) = self.create_node(path, mode::IFREG | a.perms(), a.uid, a.gid, 1).await?;
-                let (format, fork, used, nextents) = match self.store_data(ino, raw.data_fork_size(), data).await {
+                let st = match self.store_data(ino, raw.data_fork_size(), data).await {
                     Ok(stored) => stored,
                     Err(e) => {
                         self.unalloc_ino(ino)?;
                         return Err(e);
                     }
                 };
-                raw.set_data_fork(format, &fork);
+                raw.set_data_fork(st.format, &st.fork);
                 raw.set_size(data.len() as u64);
-                raw.set_nextents(nextents);
-                raw.set_nblocks(used);
-                self.write_raw(ino, &mut raw).await?;
+                raw.set_nextents(st.nextents);
+                raw.set_nblocks(st.blocks);
+                self.commit_raw(ino, &mut raw).await?;
                 self.add_name(dino, name, ino, FileType::File).await?;
                 Ok(ino)
             }
@@ -853,7 +996,7 @@ impl<D: BlockDevice> Volume<D> {
         };
         raw.set_data_fork(Format::Local, &fork);
         raw.set_size(fork.len() as u64);
-        self.write_raw(ino, &mut raw).await?;
+        self.commit_raw(ino, &mut raw).await?;
         self.w().dirs.insert(ino, DirState { parent: dino, names: BTreeMap::new() });
         self.add_name(dino, name, ino, FileType::Directory).await?;
         Ok(ino)
@@ -887,11 +1030,15 @@ impl<D: BlockDevice> Volume<D> {
         Ok(())
     }
 
-    /// Make a symbolic link at `path` pointing at `target` (1 to 1023 bytes).
+    /// Make a symbolic link at `path` pointing at `target` (1 to 1023
+    /// bytes, no NUL).
     pub async fn symlink(&mut self, path: &str, target: &str) -> Result<u64> {
         let target = target.as_bytes();
         if target.is_empty() || target.len() > MAX_LINK {
             return Err(Error::InvalidPath(format!("symlink target of {} bytes", target.len())));
+        }
+        if target.contains(&0) {
+            return Err(Error::InvalidPath(format!("symlink target with a NUL: {:?}", String::from_utf8_lossy(target))));
         }
         let (dino, name, ino, mut raw) = self.create_node(path, mode::IFLNK | 0o777, 0, 0, 1).await?;
         let fork_size = raw.data_fork_size();
@@ -930,6 +1077,7 @@ impl<D: BlockDevice> Volume<D> {
                 self.unalloc_ino(ino)?;
                 return Err(Error::NoSpace(path.into()));
             }
+            let mut blocks = Vec::with_capacity(extents.len());
             for (i, e) in extents.iter().enumerate() {
                 let off = i * payload;
                 let part = &target[off..(off + payload).min(target.len())];
@@ -939,11 +1087,16 @@ impl<D: BlockDevice> Volume<D> {
                 put32(&mut buf, 8, part.len() as u32);
                 buf[16..32].copy_from_slice(&self.sb.meta_uuid);
                 put64(&mut buf, 32, ino);
-                let at = self.sb.fsb_to_byte(e.block)?;
-                put64(&mut buf, 40, at >> 9);
+                put64(&mut buf, 40, self.sb.fsb_to_byte(e.block)? >> 9);
                 buf[SYMLINK_HDR..SYMLINK_HDR + part.len()].copy_from_slice(part);
                 crc::stamp(&mut buf, 12);
-                self.dev.write_at(at, &buf).await?;
+                blocks.push((e.block, buf));
+            }
+            if let Err(err) = self.write_blocks(&blocks).await {
+                let runs: Vec<(u64, u32)> = extents.iter().map(|e| (e.block, 1)).collect();
+                self.unalloc_runs(&runs, ino).await;
+                self.unalloc_ino(ino)?;
+                return Err(err);
             }
             let fork: Vec<u8> = extents.iter().flat_map(|e| e.encode()).collect();
             raw.set_data_fork(Format::Extents, &fork);
@@ -951,7 +1104,7 @@ impl<D: BlockDevice> Volume<D> {
             raw.set_nblocks(nblk as u64);
         }
         raw.set_size(target.len() as u64);
-        self.write_raw(ino, &mut raw).await?;
+        self.commit_raw(ino, &mut raw).await?;
         self.add_name(dino, name, ino, FileType::Symlink).await?;
         Ok(ino)
     }
@@ -970,7 +1123,7 @@ impl<D: BlockDevice> Volume<D> {
         let (dino, name, ino, mut raw) =
             self.create_node(path, kind.mode_bits() | attrs.perms(), attrs.uid, attrs.gid, 1).await?;
         raw.set_data_fork(Format::Dev, &dev.to_be_bytes());
-        self.write_raw(ino, &mut raw).await?;
+        self.commit_raw(ino, &mut raw).await?;
         self.add_name(dino, name, ino, FileType::from_mode(kind.mode_bits())).await?;
         Ok(ino)
     }
@@ -991,7 +1144,7 @@ impl<D: BlockDevice> Volume<D> {
         raw.set_nlink(raw.nlink() + 1);
         let now = self.now();
         raw.touch(now, false);
-        self.write_raw(ino, &mut raw).await?;
+        self.commit_raw(ino, &mut raw).await?;
         self.add_name(dino, name, ino, FileType::from_mode(inode.mode)).await?;
         Ok(ino)
     }
@@ -1015,7 +1168,7 @@ impl<D: BlockDevice> Volume<D> {
             raw.set_nlink(raw.nlink() - 1);
             let now = self.now();
             raw.touch(now, false);
-            self.write_raw(ino, &mut raw).await?;
+            self.commit_raw(ino, &mut raw).await?;
         }
         self.dir_state(dino).await?.names.remove(&name);
         Ok(())
@@ -1042,14 +1195,37 @@ impl<D: BlockDevice> Volume<D> {
     // ---- changing things -----------------------------------------------------
 
     /// Change permission bits, following symlinks.
+    ///
+    /// Refused ([`Error::Unsupported`]) when the read, write or execute bits
+    /// change on an inode with an access ACL: the kernel rewrites the ACL's
+    /// owner, mask and other entries to match the new mode, and this writer
+    /// cannot write attributes, so the ACL would go on granting what the
+    /// mode took away (review finding 0f02ac950500). Setuid, setgid and
+    /// sticky are not in the ACL and may change.
     pub async fn chmod(&mut self, path: &str, perms: u16) -> Result<()> {
         let ino = self.resolve(path.as_bytes(), true).await?;
         self.writer().await?;
+        let inode = self.inode(ino).await?;
+        self.check_mode_change(&inode, perms & 0o7777, path).await?;
         let mut raw = self.read_raw(ino).await?;
         raw.set_mode(raw.mode() & mode::IFMT | perms & 0o7777);
         let now = self.now();
         raw.touch(now, false);
-        self.write_raw(ino, &mut raw).await
+        self.commit_raw(ino, &mut raw).await
+    }
+
+    /// Refuse a change of `inode`'s permission bits to `perms` that its
+    /// access ACL would have to follow.
+    async fn check_mode_change(&self, inode: &Inode, perms: u16, path: &str) -> Result<()> {
+        if (inode.mode ^ perms) & 0o777 == 0 || inode.aformat.is_none() {
+            return Ok(());
+        }
+        if self.xattr_names(inode).await?.iter().any(|x| x.name == "system.posix_acl_access") {
+            return Err(Error::Unsupported(format!(
+                "{path}: changing the permission bits of a file with an access ACL (the ACL would have to be rewritten to match)"
+            )));
+        }
+        Ok(())
     }
 
     /// Change the owner, following symlinks.
@@ -1060,7 +1236,7 @@ impl<D: BlockDevice> Volume<D> {
         raw.set_owner(uid, gid);
         let now = self.now();
         raw.touch(now, false);
-        self.write_raw(ino, &mut raw).await
+        self.commit_raw(ino, &mut raw).await
     }
 
     // ---- flush ---------------------------------------------------------------
@@ -1072,13 +1248,25 @@ impl<D: BlockDevice> Volume<D> {
     /// **Call this before dropping the volume.** Until then names, free
     /// space and inode maps are in memory only, and the filesystem on disk
     /// is not consistent. The volume can go on being written afterwards.
+    ///
+    /// A flush that fails part-way can be run again: a directory stays
+    /// pending until it is written, and an AG until its trees, its headers,
+    /// the superblock and the device flush are all done, so a retry writes
+    /// whatever did not get there (review findings 793cd4f33612,
+    /// a72ebcf6af32, 03ce0a0cf15e). A failure that could not be undone
+    /// instead makes every later change and flush fail.
     pub async fn flush(&mut self) -> Result<()> {
+        self.check_poisoned()?;
         if self.w.is_none() {
             return self.dev.flush().await;
         }
-        let dirs = std::mem::take(&mut self.w().dirs);
-        for (dino, st) in &dirs {
-            self.write_dir(*dino, st).await?;
+        let pending: Vec<u64> = self.w().dirs.keys().copied().collect();
+        for dino in pending {
+            let st = self.w().dirs.remove(&dino).expect("pending directory");
+            if let Err(e) = self.write_dir(dino, &st).await {
+                self.w().dirs.insert(dino, st);
+                return Err(e);
+            }
         }
 
         let mut writes = Vec::new();
@@ -1106,17 +1294,21 @@ impl<D: BlockDevice> Volume<D> {
             ifree += free;
             fdblocks += Ag::agf_free_blocks(&headers.0);
         }
-        let mut sbuf = vec![0u8; self.sb.sect()];
-        self.dev.read_at(0, &mut sbuf).await?;
+        let mut sbuf = read_aligned(&self.dev, self.sb.block_size as u64, 0, self.sb.sect()).await?;
         put64(&mut sbuf, 128, icount);
         put64(&mut sbuf, 136, ifree);
         put64(&mut sbuf, 144, fdblocks);
         crc::stamp(&mut sbuf, 224);
         self.dev.write_at(0, &sbuf).await?;
+        self.dev.flush().await?;
         self.sb.icount = icount;
         self.sb.ifree = ifree;
         self.sb.free_blocks = fdblocks;
-        self.w().new_chunks = 0;
-        self.dev.flush().await
+        let w = self.w();
+        w.new_chunks = 0;
+        for ag in w.ags.values_mut() {
+            ag.dirty = false;
+        }
+        Ok(())
     }
 }

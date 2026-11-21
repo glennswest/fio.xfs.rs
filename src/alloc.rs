@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::btree::{self, AgSpec, Rec, NULL_AGBLOCK};
 use crate::bytes::{be16, be32, be64, put32};
 use crate::crc;
-use crate::device::BlockDevice;
+use crate::device::{read_aligned, BlockDevice};
 use crate::error::{corrupt, Error, Result};
 use crate::sb::Superblock;
 
@@ -196,6 +196,7 @@ impl Chunk {
 }
 
 /// An allocation group being written.
+#[derive(Clone)]
 pub struct Ag {
     /// Its number.
     pub agno: u32,
@@ -284,10 +285,9 @@ impl Ag {
 
     /// Read an AG's headers: its AGF and AGI, checked.
     pub async fn read_headers<D: BlockDevice + ?Sized>(dev: &D, sb: &Superblock, agno: u32) -> Result<(Vec<u8>, Vec<u8>)> {
-        let mut agf = vec![0u8; sb.sect()];
-        let mut agi = vec![0u8; sb.sect()];
-        dev.read_at(Self::header_at(sb, agno, 1), &mut agf).await?;
-        dev.read_at(Self::header_at(sb, agno, 2), &mut agi).await?;
+        let bs = sb.block_size as u64;
+        let agf = read_aligned(dev, bs, Self::header_at(sb, agno, 1), sb.sect()).await?;
+        let agi = read_aligned(dev, bs, Self::header_at(sb, agno, 2), sb.sect()).await?;
         if be32(&agf, 0) != AGF_MAGIC || !crc::verify(&agf, AGF_CRC) || be32(&agf, 8) != agno {
             return Err(corrupt(format!("AG {agno}: AGF")));
         }
@@ -372,8 +372,7 @@ impl Ag {
             old_tree_blocks.extend(blocks);
         }
 
-        let mut agfl_buf = vec![0u8; sb.sect()];
-        dev.read_at(Self::header_at(sb, agno, 3), &mut agfl_buf).await?;
+        let agfl_buf = read_aligned(dev, sb.block_size as u64, Self::header_at(sb, agno, 3), sb.sect()).await?;
         if be32(&agfl_buf, 0) != AGFL_MAGIC || !crc::verify(&agfl_buf, AGFL_CRC) {
             return Err(corrupt(format!("AG {agno}: AGFL")));
         }
@@ -625,7 +624,21 @@ impl Ag {
     /// trees. Carving changes the very counts the trees are sized by — an
     /// extent used up is one fewer free record, a run next to the AGFL one
     /// fewer mapping — so the sizes are worked out again until they hold.
+    ///
+    /// On an error the AG is left as it was. It stays [`Ag::dirty`] either
+    /// way: the caller clears that once every block returned is on the
+    /// device, so a flush that fails part-way rebuilds it again (review
+    /// findings 793cd4f33612, 03ce0a0cf15e).
     pub fn rebuild(&mut self, sb: &Superblock) -> Result<Vec<(u64, Vec<u8>)>> {
+        let before = self.clone();
+        let out = self.rebuild_in_place(sb);
+        if out.is_err() {
+            *self = before;
+        }
+        out
+    }
+
+    fn rebuild_in_place(&mut self, sb: &Superblock) -> Result<Vec<(u64, Vec<u8>)>> {
         let bs = sb.block_size as usize;
         for b in std::mem::take(&mut self.old_tree_blocks) {
             self.free_extent(b, 1)?;
@@ -773,7 +786,6 @@ impl Ag {
         // works out the AG- and inobt-owned mappings again.
         self.old_tree_blocks = ag_list.into_iter().chain(ino_list).collect();
         self.reserve = (self.old_tree_blocks.len() as u64 * 2 + 32).min(self.len as u64 / 8);
-        self.dirty = false;
         Ok(writes)
     }
 

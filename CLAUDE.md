@@ -64,7 +64,7 @@ its CLAUDE.md).
       kernel recounts. Verified: sc-build of b3aa485 (all suites, 0
       warnings); the kernel test's recount matches `stat`, and a control
       with the flags put back keeps the stale count.
-- [ ] Issue #26 (P1, 2026-11-20) — review findings in `src/write.rs`:
+- [~] Issue #26 (P1, 2026-11-20, in progress: fixes and tests pushed, sc-build next) — review findings in `src/write.rs`:
       0f02ac950500 (chmod with an access ACL), 1fed3c80f651 (writer reads not
       block-aligned), 793cd4f33612 / a72ebcf6af32 / 03ce0a0cf15e (a failed
       flush drops pending state; a retry falsely succeeds), 8b48ae8c1697

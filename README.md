@@ -31,7 +31,7 @@ filesystems (#5).
 | Writes | |
 |---|---|
 | Filesystems | v5 (CRC) only — what `mkfs.xfs` has made by default since 2015 and all `mkfs-xfs` makes — with finobt, rmapbt, reflink, inobtcount, bigtime, 64-bit extent counts and sparse inodes, each on or off. Refused (`Error::Unsupported`): v4, case-insensitive names, directories without file types (`-n ftype=0`), parent pointers (on by default from xfsprogs 7: make the filesystem with `mkfs.xfs -n parent=0` to write into it; #20), metadir, zoned, unknown features, log-incompatible features set, more than 64 inodes per block, a log that is not clean (an external log is not checked) |
-| Operations | `write` (create or replace a whole file), `mkdir`, `mkdir_all`, `symlink` (targets up to 1023 bytes), `mknod` (devices, FIFOs, sockets), `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `*_with` variants take `Attrs` (mode, uid, gid) |
+| Operations | `write` (create or replace a whole file), `mkdir`, `mkdir_all`, `symlink` (targets up to 1023 bytes), `mknod` (devices, FIFOs, sockets), `link`, `unlink`, `rmdir`, `chmod`, `chown`, `set_time`, `flush`; `*_with` variants take `Attrs` (mode, uid, gid). A name of more than 255 bytes, `.`, `..`, or a path or symlink target with a NUL in it is `Error::InvalidPath`. Changing the read, write or execute bits (`chmod`, or `write_with` on an existing file) of a file with an access ACL is `Error::Unsupported`: the kernel rewrites the ACL to match the mode, and attributes cannot be written here |
 | Kept true | free space (by block and by length), inode chunks and free-inode records, reverse mappings, bmap B+trees for files with more extents than their inode holds, every directory form, every checksum, AGF/AGI/superblock counters — `xfs_repair -n` finds nothing, and the kernel mounts, reads and goes on writing the result |
 | Quotas | counts are not kept: on a filesystem with quotas, the first change clears the quota "checked" flags in the superblock (flushed before anything else is written; accounting and enforcement stay on), so the kernel recounts (quotacheck) at its next mount with quotas on — what `xfs_repair` does when it finds counts wrong |
 | Not yet | extended attributes, rename, writing into the middle of a file, realtime files; rewriting or removing a file whose extents are shared (reflinked) is refused |
@@ -103,6 +103,15 @@ AGF and AGI and the superblock counters. Reads between writes see the
 writes. The log is not written: the filesystem must be cleanly unmounted to
 start with, and it stays so.
 
+A change whose blocks cannot be found or written gives back what it took
+and changes nothing. A `flush` that fails part-way returns the error and
+keeps whatever it did not finish (directories not yet laid out, AGs whose
+trees or headers did not reach the device), so calling `flush` again writes
+the rest. A failure that cannot be undone — an inode write outside `flush`,
+which leaves that inode neither old nor new — makes every later change and
+`flush` fail with `Error::Corrupt` rather than report success; reopen the
+volume (and check the image) to go on.
+
 Lookups resolve symlinks in the middle of a path (absolute targets from the
 image's root, at most 40 hops); `stat`, `lookup`, `read_link` and
 `list_xattrs` do not follow a final symlink, `read`, `read_range` and
@@ -129,6 +138,9 @@ hands each name and its inode to a closure instead of collecting them;
 Anything that implements `fio_xfs::BlockDevice` (`size` and `read_at`) can
 be read, and written when it also implements `write_at` (and `flush`);
 `FileDevice` (`open` read-only, `open_rw`) and `MemDevice` are provided.
+After `Volume::open` every read, the writer's included, is whole filesystem
+blocks at a block boundary; writes are whole blocks, or one sector for the
+superblock and AG headers.
 
 ## How it ships
 

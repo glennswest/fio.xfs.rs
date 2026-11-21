@@ -9,10 +9,11 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 
 use common::{build, bytes, dir_form, have, run, sparse, Image, Tree, Want};
 use fio_xfs::inode::Format;
-use fio_xfs::{Attrs, Error, FileDevice, FileType, Special, Volume};
+use fio_xfs::{Attrs, BlockDevice, Error, FileDevice, FileType, Special, Volume};
 
 fn skip() -> bool {
     if !have("mkfs.xfs") || !have("xfs_repair") {
@@ -403,9 +404,22 @@ async fn errors() {
     assert!(matches!(vol.unlink("/d/none").await, Err(Error::NotFound(_))));
     assert!(matches!(vol.mkdir("/").await, Err(Error::InvalidPath(_))));
     assert!(matches!(vol.symlink("/too-long", &"x".repeat(1024)).await, Err(Error::InvalidPath(_))));
+    // Review finding 8b48ae8c1697: a NUL cannot be in an XFS name or a
+    // symlink target, so every creation refuses one before allocating.
+    assert!(matches!(vol.write("/a\0b", b"x").await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.write_with("/d/\0", b"x", &Attrs::default()).await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.mkdir("/nul\0dir").await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.mkdir_all("/d/x\0/y").await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.link("/d/f", "/d/l\0").await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.symlink("/s\0", "t").await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.symlink("/s", "a\0b").await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.mknod("/n\0", Special::Fifo, &Attrs::default()).await, Err(Error::InvalidPath(_))));
+    assert!(matches!(vol.write("/d/x\0/f", b"x").await, Err(Error::InvalidPath(_))));
+    assert!(!vol.exists("/s").await.unwrap());
     // Reads in the middle see what was written.
     assert_eq!(vol.read("/d/f").await.unwrap(), b"x");
     assert_eq!(vol.read_dir("/d").await.unwrap().len(), 1);
+    assert_eq!(vol.read_dir("/").await.unwrap().len(), 1, "nothing left behind by the refusals");
     vol.flush().await.unwrap();
     drop(vol);
     repair_clean(&img, "after the error cases");
@@ -498,4 +512,245 @@ async fn first_change_invalidates_quota_counts() {
     assert_eq!(qflags(&img.path), quota::ALL_ACCT | ENFD);
     let vol = img.open().await;
     assert_eq!(vol.read("/owned").await.unwrap(), bytes(9, 100_000));
+}
+
+/// A device that holds the writer to the [`BlockDevice`] contract — once the
+/// volume is open, reads are whole filesystem blocks at block boundaries;
+/// writes are whole blocks, or a sector for the superblock and AG headers
+/// (review finding 1fed3c80f651) — and whose writes can be made to fail from
+/// the `n`th on.
+struct Strict {
+    inner: fio_xfs::MemDevice,
+    block: u64,
+    sect: u64,
+    strict: AtomicBool,
+    writes: AtomicU64,
+    fail_from: AtomicU64,
+}
+
+impl Strict {
+    fn new(bytes: Vec<u8>) -> Self {
+        let sect = u16::from_be_bytes([bytes[102], bytes[103]]) as u64;
+        let block = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as u64;
+        Strict {
+            inner: fio_xfs::MemDevice::new(bytes),
+            block,
+            sect,
+            strict: AtomicBool::new(false),
+            writes: AtomicU64::new(0),
+            fail_from: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    /// Fail every write from the `n`th from now (0: the next one).
+    fn fail_after(&self, n: u64) {
+        self.fail_from.store(self.writes.load(SeqCst) + n, SeqCst);
+    }
+
+    fn heal(&self) {
+        self.fail_from.store(u64::MAX, SeqCst);
+    }
+
+    fn writes(&self) -> u64 {
+        self.writes.load(SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl BlockDevice for Strict {
+    fn size(&self) -> u64 {
+        self.inner.size()
+    }
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> fio_xfs::Result<()> {
+        if self.strict.load(SeqCst) {
+            assert!(
+                offset % self.block == 0 && buf.len() as u64 % self.block == 0,
+                "read of {} bytes at {offset}: not whole {}-byte blocks",
+                buf.len(),
+                self.block
+            );
+        }
+        self.inner.read_at(offset, buf).await
+    }
+    async fn write_at(&self, offset: u64, buf: &[u8]) -> fio_xfs::Result<()> {
+        let len = buf.len() as u64;
+        assert!(
+            (offset % self.block == 0 && len % self.block == 0) || (offset % self.sect == 0 && len == self.sect),
+            "write of {len} bytes at {offset}: neither whole blocks nor a sector"
+        );
+        if self.writes.fetch_add(1, SeqCst) >= self.fail_from.load(SeqCst) {
+            return Err(std::io::Error::other("injected write failure").into());
+        }
+        self.inner.write_at(offset, buf).await
+    }
+}
+
+async fn open_strict(bytes: Vec<u8>) -> Volume<Strict> {
+    let vol = Volume::open(Strict::new(bytes)).await.unwrap();
+    vol.device().strict.store(true, SeqCst);
+    vol
+}
+
+/// 4 KiB blocks over 512-byte sectors, so that a sector or inode read is
+/// smaller than a block.
+fn strict_base() -> (Image, Vec<u8>) {
+    let img = fresh(&["-s", "size=512", "-i", "size=512"], 300);
+    let bytes = std::fs::read(&img.path).unwrap();
+    (img, bytes)
+}
+
+/// Changes on disk, then more pending, every kind of write in them: a
+/// directory that grows from block to leaf form (its old fork given back),
+/// one that shrinks, a file replaced, chmod and chown, a remote symlink.
+async fn staged(base: &[u8]) -> (Volume<Strict>, Tree) {
+    let mut tree = Tree::default();
+    let mut vol = open_strict(base.to_vec()).await;
+    vol.mkdir("/d").await.unwrap();
+    tree.dir("d");
+    for i in 0..40 {
+        vol.write(&format!("/d/f-{i:04}"), &bytes(i, 100)).await.unwrap();
+        tree.file(&format!("d/f-{i:04}"), bytes(i, 100));
+    }
+    vol.write("/big", &bytes(1, 1 << 20)).await.unwrap();
+    vol.flush().await.unwrap();
+
+    for i in 40..400 {
+        vol.write(&format!("/d/f-{i:04}"), &bytes(i, 10)).await.unwrap();
+        tree.file(&format!("d/f-{i:04}"), bytes(i, 10));
+    }
+    for i in 0..6 {
+        vol.unlink(&format!("/d/f-{i:04}")).await.unwrap();
+        tree.items.remove(&format!("d/f-{i:04}"));
+    }
+    vol.write("/big", &bytes(2, 100_000)).await.unwrap();
+    tree.file("big", bytes(2, 100_000));
+    vol.chmod("/d/f-0010", 0o600).await.unwrap();
+    tree.items.insert("d/f-0010".into(), Want::File { data: bytes(10, 100), mode: 0o600, uid: 0, gid: 0 });
+    vol.chown("/d/f-0011", 7, 8).await.unwrap();
+    tree.items.insert("d/f-0011".into(), Want::File { data: bytes(11, 100), mode: 0o644, uid: 7, gid: 8 });
+    vol.write_with("/d/f-0012", b"again", &Attrs::mode(0o640).owner(3, 4)).await.unwrap();
+    tree.items.insert("d/f-0012".into(), Want::File { data: b"again".to_vec(), mode: 0o640, uid: 3, gid: 4 });
+    vol.mkdir("/e").await.unwrap();
+    tree.dir("e");
+    vol.symlink("/e/long", &long_target(900)).await.unwrap();
+    tree.items.insert("e/long".into(), Want::Symlink(long_target(900).into_bytes()));
+    (vol, tree)
+}
+
+/// Review findings 793cd4f33612, a72ebcf6af32, 03ce0a0cf15e and
+/// 6dd91ec6c081: a flush whose writes fail part-way — in a directory's new
+/// blocks, its inode, an AG's trees or headers, the superblock — returns
+/// the error, keeps what it did not finish, and a second flush writes it
+/// all: `xfs_repair -n` finds nothing and every name and byte reads back.
+/// Every read the writer makes goes through the contract-checking device.
+#[tokio::test]
+async fn failed_flush_can_be_retried() {
+    if skip() {
+        return;
+    }
+    let (img, base) = strict_base();
+    let (mut vol, tree) = staged(&base).await;
+    let before = vol.device().writes();
+    vol.flush().await.unwrap();
+    let total = vol.device().writes() - before;
+    assert!(total > 10, "a flush of {total} writes");
+    let mut points: Vec<u64> = vec![0, 1, 2, 3, total / 4, total / 2, total * 3 / 4, total - 2, total - 1];
+    points.sort();
+    points.dedup();
+
+    for n in points {
+        let (mut vol, tree) = staged(&base).await;
+        vol.device().fail_after(n);
+        let err = vol.flush().await.expect_err("a flush whose writes fail");
+        assert!(matches!(err, Error::Io(_)), "write {n} of {total}: {err}");
+        vol.device().heal();
+        vol.flush().await.unwrap_or_else(|e| panic!("retry after write {n} of {total} failed: {e}"));
+        vol.flush().await.unwrap();
+        std::fs::write(&img.path, vol.into_device().inner.into_inner()).unwrap();
+        repair_clean(&img, &format!("after write {n} of {total} failed and the flush was retried"));
+        verify(&img, &tree).await;
+    }
+
+    // And the image a clean flush left.
+    std::fs::write(&img.path, vol.into_device().inner.into_inner()).unwrap();
+    repair_clean(&img, "after a clean flush on the strict device");
+    verify(&img, &tree).await;
+}
+
+/// A failed write outside a flush: one into new blocks is given back and the
+/// writer goes on; one to an inode leaves it neither old nor new, so every
+/// later change and flush is refused rather than reporting success.
+#[tokio::test]
+async fn failed_inode_write_poisons_the_writer() {
+    if skip() {
+        return;
+    }
+    let (img, base) = strict_base();
+    let mut vol = open_strict(base).await;
+    vol.write("/first", b"one").await.unwrap();
+
+    vol.device().fail_after(0);
+    assert!(matches!(vol.write("/x", &bytes(3, 50_000)).await, Err(Error::Io(_))));
+    vol.device().heal();
+    vol.write("/x", &bytes(3, 50_000)).await.unwrap();
+    vol.flush().await.unwrap();
+    let (vol_bytes, mut vol) = {
+        let dev = vol.into_device();
+        let b = dev.inner.into_inner();
+        (b.clone(), open_strict(b).await)
+    };
+    std::fs::write(&img.path, vol_bytes).unwrap();
+    repair_clean(&img, "after a failed data write was given back");
+    let mut tree = Tree::default();
+    tree.file("first", b"one".to_vec());
+    tree.file("x", bytes(3, 50_000));
+    verify(&img, &tree).await;
+
+    // chmod writes only the inode.
+    vol.device().fail_after(0);
+    assert!(matches!(vol.chmod("/x", 0o600).await, Err(Error::Io(_))));
+    vol.device().heal();
+    for r in [vol.flush().await, vol.write("/y", b"y").await.map(drop), vol.chmod("/first", 0o600).await] {
+        match r {
+            Err(Error::Corrupt(m)) => assert!(m.contains("earlier failure"), "{m}"),
+            other => panic!("after a failed inode write: {other:?}"),
+        }
+    }
+}
+
+/// Review finding 0f02ac950500: changing the permission bits of a file with
+/// an access ACL would leave the ACL granting what the mode took away (the
+/// kernel rewrites the ACL with the mode; this writer cannot write
+/// attributes), so it is refused, and nothing changes. Setuid and friends,
+/// which are not in the ACL, and files without one, still change.
+#[tokio::test]
+async fn mode_change_refused_with_an_access_acl() {
+    if skip() || !have("xfs_db") {
+        return;
+    }
+    let mut tree = Tree::default();
+    tree.file("acl", b"acl\n".to_vec());
+    tree.file("plain", b"plain\n".to_vec());
+    // Only the name matters to the check, and xfs_db sets text values.
+    tree.attr("acl", "-r", "SGI_ACL_FILE", common::AttrValue::Text("x".into()));
+    let img = build(&tree, &["-n", "parent=0"], 512);
+
+    let mut vol = open_rw(&img).await;
+    let refused = |r: fio_xfs::Result<()>| match r {
+        Err(Error::Unsupported(m)) => assert!(m.contains("ACL"), "{m}"),
+        other => panic!("a mode change under an ACL: {other:?}"),
+    };
+    refused(vol.chmod("/acl", 0o600).await);
+    refused(vol.write_with("/acl", b"new\n", &Attrs::mode(0o666)).await.map(drop));
+    assert_eq!(vol.read("/acl").await.unwrap(), b"acl\n", "the refused write changed nothing");
+    vol.chmod("/acl", 0o4644).await.unwrap();
+    vol.write_with("/acl", b"new\n", &Attrs::mode(0o4644).owner(1, 1)).await.unwrap();
+    vol.chmod("/plain", 0o600).await.unwrap();
+    vol.flush().await.unwrap();
+    drop(vol);
+
+    let vol = img.open().await;
+    assert_eq!(vol.stat("/acl").await.unwrap().mode & 0o7777, 0o4644);
+    assert_eq!(vol.read("/acl").await.unwrap(), b"new\n");
+    assert_eq!(vol.stat("/plain").await.unwrap().mode & 0o7777, 0o600);
 }

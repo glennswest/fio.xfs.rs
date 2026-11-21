@@ -454,7 +454,13 @@ impl<D: BlockDevice> Volume<D> {
 
     /// Every user-visible extended attribute of an inode.
     pub async fn xattrs_inode(&self, inode: &Inode) -> Result<Vec<Xattr>> {
-        let found = match inode.aformat {
+        let found = self.xattr_names(inode).await?;
+        self.xattr_values(inode, found).await
+    }
+
+    /// An inode's user-visible attribute names, and where each value is.
+    pub(crate) async fn xattr_names(&self, inode: &Inode) -> Result<Vec<attr::Found>> {
+        Ok(match inode.aformat {
             None => return Ok(Vec::new()),
             // An attribute fork made ready and never used: Linux gives new
             // inodes one up front when ACLs or security labels may follow,
@@ -485,8 +491,11 @@ impl<D: BlockDevice> Volume<D> {
                 found
             }
             Some(Format::Dev) => return Err(corrupt(format!("inode {}: device-format attributes", inode.ino))),
-        };
+        })
+    }
 
+    /// The values of the attributes [`Volume::xattr_names`] found.
+    async fn xattr_values(&self, inode: &Inode, found: Vec<attr::Found>) -> Result<Vec<Xattr>> {
         let mut out = Vec::with_capacity(found.len());
         let mut extents = None;
         for f in found {

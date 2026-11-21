@@ -74,6 +74,19 @@ impl<T: BlockDevice + ?Sized> BlockDevice for std::sync::Arc<T> {
     }
 }
 
+/// Read `len` bytes at `at` the way the trait promises a device: the whole
+/// `block`-byte blocks around them, at a block boundary, sliced. For the
+/// writer's inodes, sectors and headers, which are smaller than a block
+/// (review finding 1fed3c80f651).
+pub(crate) async fn read_aligned<D: BlockDevice + ?Sized>(dev: &D, block: u64, at: u64, len: usize) -> Result<Vec<u8>> {
+    let from = at - at % block;
+    let to = (at + len as u64).div_ceil(block) * block;
+    let mut buf = vec![0u8; (to - from) as usize];
+    dev.read_at(from, &mut buf).await?;
+    let off = (at - from) as usize;
+    Ok(buf[off..off + len].to_vec())
+}
+
 fn check_range(size: u64, offset: u64, len: usize) -> Result<()> {
     check_range_for("read", size, offset, len)
 }
